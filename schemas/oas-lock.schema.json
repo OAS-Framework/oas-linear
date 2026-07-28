@@ -1,0 +1,158 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oas.dev/schemas/oas-lock.schema.json",
+  "title": "OAS lockfile (oas-lock.json)",
+  "description": "Scope-local lockfile. lockfileVersion 2 locks whole distribution packages (exact commit + integrity); lockfileVersion 1 is the legacy per-capability marketplace lock, still readable for migration only. A lock never advances silently on restore.",
+  "type": "object",
+  "required": [
+    "lockfileVersion"
+  ],
+  "oneOf": [
+    {
+      "title": "lockfileVersion 2 — package locks",
+      "type": "object",
+      "required": [
+        "lockfileVersion",
+        "packages"
+      ],
+      "properties": {
+        "lockfileVersion": {
+          "const": 2
+        },
+        "packages": {
+          "description": "Map of package identity → exact lock entry for the full dependency closure at this scope.",
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^[a-z0-9][a-z0-9._-]*$"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "source",
+              "version",
+              "commit",
+              "integrity",
+              "capabilities"
+            ],
+            "properties": {
+              "source": {
+                "description": "Normalized acquisition source: git:<url>@<ref>, path:<dir>, catalog:<id> for an originally bare catalog request, or catalog:<id>@<selector> for an originally explicit selector (the resolved commit is separate; official catalog identity grants no executable trust).",
+                "type": "string",
+                "pattern": "^(git:|path:|catalog:).+"
+              },
+              "version": {
+                "description": "Version from the locked oas-package.json.",
+                "type": "string",
+                "minLength": 1
+              },
+              "commit": {
+                "description": "Exact git commit the package was acquired at (40-hex). For path: sources this is the string \"local\".",
+                "type": "string",
+                "pattern": "^([0-9a-f]{40}|local)$"
+              },
+              "integrity": {
+                "description": "sha256 tree hash of the installed package root; any change invalidates all capability approvals.",
+                "type": "string",
+                "pattern": "^sha256-[0-9a-f]{64}$"
+              },
+              "depsIntegrity": {
+                "description": "sha256 digest of the MATERIALIZED runtime dependency closure (every node_modules tree under the package root); absent when the package has no runtime deps. Trust verifies it alongside the source integrity.",
+                "type": "string",
+                "pattern": "^sha256-[0-9a-f]{64}$"
+              },
+              "capabilities": {
+                "description": "Capability IDs the locked manifest exports. Verification metadata only — must match the locked oas-package.json on restore.",
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "uniqueItems": true
+              },
+              "dependencies": {
+                "description": "Package identities of direct dependencies (each present in this lock's packages map).",
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9._-]*$"
+                },
+                "uniqueItems": true
+              },
+              "trustedCapabilities": {
+                "description": "Capability IDs whose executable surfaces (commands/hooks) are approved at exactly this integrity. Subset of capabilities. Reset to [] whenever integrity changes.",
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "uniqueItems": true
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "capabilities": {
+          "description": "OPTIONAL legacy v1 capability-lock residue retained during staged migration (entries `oas migrate` could not yet map to packages). Same entry shape as lockfileVersion 1; doctor flags them as pending migration.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "source",
+              "version",
+              "integrity"
+            ],
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "title": "lockfileVersion 1 — legacy per-capability marketplace locks (readable for migration only)",
+      "type": "object",
+      "required": [
+        "lockfileVersion",
+        "capabilities"
+      ],
+      "properties": {
+        "lockfileVersion": {
+          "const": 1
+        },
+        "capabilities": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "source",
+              "version",
+              "integrity"
+            ],
+            "properties": {
+              "source": {
+                "description": "marketplace:<id>@<version>, git:<url>, or path:<dir>.",
+                "type": "string",
+                "minLength": 1
+              },
+              "version": {
+                "type": "string",
+                "minLength": 1
+              },
+              "commit": {
+                "type": "string"
+              },
+              "integrity": {
+                "type": "string",
+                "pattern": "^sha256-[0-9a-f]{64}$"
+              },
+              "trustedExecutables": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  ]
+}

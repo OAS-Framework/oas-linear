@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oas.dev/schemas/oas-package.schema.json",
+  "title": "OAS distribution package manifest (oas-package.json)",
+  "description": "Manifest at a distribution-package root. A package is the source, acquisition, dependency, update, integrity, and review unit; it explicitly enumerates the capabilities and config profiles it ships. Install never ambiently loads undeclared files. Every declared path is package-relative and must remain inside the locked package after symlink resolution.",
+  "type": "object",
+  "required": [
+    "package",
+    "version",
+    "description",
+    "compatibility"
+  ],
+  "properties": {
+    "package": {
+      "description": "Package identity. Namespaced separately from capability IDs; unique at one config scope.",
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]*$"
+    },
+    "version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1
+    },
+    "compatibility": {
+      "type": "object",
+      "properties": {
+        "oas": {
+          "description": "OAS kernel compatibility floor. Accepted grammar exactly: >=x.y.z, ^x.y.z, or exact x.y.z.",
+          "type": "string",
+          "pattern": "^(>=|\\^)?\\d+\\.\\d+\\.\\d+$"
+        }
+      },
+      "required": [
+        "oas"
+      ],
+      "additionalProperties": false
+    },
+    "capabilities": {
+      "description": "Package-relative directories each containing one capability oas.json. Paths must not escape the package root after symlink resolution.",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^[^/].*$",
+        "not": {
+          "pattern": "(^|/)\\.\\.(/|$)"
+        }
+      },
+      "uniqueItems": true
+    },
+    "configs": {
+      "description": "Named config profiles: complete reference oas-config.yaml files that an adopter may snapshot with `oas init --package`. Profiles are config source material, never live policy.",
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z0-9][a-z0-9._-]*$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "path"
+        ],
+        "properties": {
+          "path": {
+            "description": "Package-relative path to the profile's oas-config.yaml.",
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^/].*$",
+            "not": {
+              "pattern": "(^|/)\\.\\.(/|$)"
+            }
+          },
+          "description": {
+            "type": "string"
+          },
+          "default": {
+            "description": "At most one profile may be marked default; it removes the need for --config at adoption.",
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "dependencies": {
+      "description": "Package source specifications (NOT capability IDs): official catalog selectors (e.g. \"oas.okf@v1.4.0\"), git:host/org/repo@ref, raw HTTPS/SSH git URLs with @ref, or local paths. No general semver ranges; the resolved closure is exact-locked.",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    }
+  },
+  "additionalProperties": false
+}

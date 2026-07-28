@@ -1,0 +1,16 @@
+{
+  "name": "@oas-framework/oas-linear",
+  "version": "1.0.0",
+  "description": "Official OAS tasks integration for Linear with JSON-first GraphQL issue commands.",
+  "license": "MIT",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "validate": "node scripts/validate-manifests.mjs",
+    "test": "npm run validate && node --test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/OAS-Framework/oas-linear"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "package": "oas.linear",
+  "version": "1.0.0",
+  "description": "Official OAS tasks integration for Linear with JSON-first GraphQL issue commands.",
+  "compatibility": {
+    "oas": ">=0.19.0"
+  },
+  "capabilities": [
+    "capabilities/oas-linear"
+  ]
+}
