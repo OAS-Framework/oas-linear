@@ -1,0 +1,8 @@
+name: oas-linear-expert
+kind: persistent
+description: Owner of the official oas.linear package: Linear task integration, implementation, maintenance, releases, and support
+type: package-maintainers
+repo: /Users/pepe-reyero/oas-workspace/oas-linear
+work: worktree
+runtime: claude
+model: opus
