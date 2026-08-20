@@ -213,14 +213,23 @@ export function checkScripts(pkg, inventory, env = {}) {
  *    even when suites FAIL (it is set in every test-file process and inherited
  *    by that process's children).
  *
- * Deleted rather than allow-listed: an allow-list of everything a child may
+ * Denied rather than allow-listed: an allow-list of everything a child may
  * need is unenumerable, and getting it wrong breaks legitimate runs. This is a
  * short, closed list of ways to change what a child EXECUTES.
+ *
+ * Matched case-INSENSITIVELY, and by rebuilding rather than deleting. Windows
+ * resolves environment names case-insensitively, but `{ ...process.env }` is an
+ * ordinary object with ordinary case-sensitive keys: a caller who spells it
+ * `node_test_context` survives three uppercase `delete`s and is still
+ * `NODE_TEST_CONTEXT` to the child. Copying only what passes the filter cannot
+ * miss a spelling that way.
  */
+const CHILD_ENV_DENYLIST = new Set(["NODE_OPTIONS", "NODE_REPL_EXTERNAL_MODULE", "NODE_TEST_CONTEXT"]);
+
 export function childEnv(source) {
-  const env = { ...source };
-  for (const name of ["NODE_OPTIONS", "NODE_REPL_EXTERNAL_MODULE", "NODE_TEST_CONTEXT"]) {
-    delete env[name];
+  const env = {};
+  for (const [name, value] of Object.entries(source)) {
+    if (!CHILD_ENV_DENYLIST.has(name.toUpperCase())) env[name] = value;
   }
   return env;
 }

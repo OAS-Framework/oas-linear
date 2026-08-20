@@ -409,3 +409,22 @@ test("childEnv removes every way to change what a child executes", () => {
   assert.deepEqual(env, { PATH: "/usr/bin", HOME: "/home/x", NODE_ENV: "test" },
     "injection vectors stripped, ordinary environment preserved");
 });
+
+test("childEnv matches denied names case-insensitively", () => {
+  // Windows resolves environment names case-insensitively, but the object
+  // spread of process.env does not: a lowercase `node_test_context` would
+  // survive an uppercase delete and still reach the child as NODE_TEST_CONTEXT,
+  // whose effect is a `node --test` that exits 0 over FAILING suites.
+  for (const name of [
+    "node_test_context", "Node_Test_Context", "NODE_test_CONTEXT",
+    "node_options", "Node_Options", "node_repl_external_module",
+  ]) {
+    assert.deepEqual(childEnv({ [name]: "x", KEEP: "y" }), { KEEP: "y" },
+      `${name} must be stripped regardless of case`);
+  }
+  // Non-vacuity: names that merely resemble the denied ones are preserved.
+  assert.deepEqual(
+    childEnv({ NODE_ENV: "test", NODE_OPTIONS_EXTRA: "x", MY_NODE_OPTIONS: "y" }),
+    { NODE_ENV: "test", NODE_OPTIONS_EXTRA: "x", MY_NODE_OPTIONS: "y" },
+    "only exact names, case-insensitively, are denied");
+});

@@ -337,7 +337,12 @@ Three properties are not statements about the text and are enforced separately:
   `NODE_OPTIONS` carries `--require`, so a preload that exits when `argv[1]` is
   the validator made the gate announce validation, run the suites and exit 0
   having validated nothing. `NODE_OPTIONS`, `NODE_REPL_EXTERNAL_MODULE` and
-  `NODE_TEST_CONTEXT` are stripped for every child.
+  `NODE_TEST_CONTEXT` are stripped for every child — matched case-insensitively
+  and by rebuilding the environment, because Windows resolves variable names
+  case-insensitively while an object spread of `process.env` does not, so a
+  lowercase spelling would survive a `delete` and still reach the child. That
+  normalization is unit-tested; the repository's CI is Linux-only, so it is not
+  covered by an end-to-end Windows run.
 
 What the gate guarantees is correspondingly narrow, and stated plainly: **when
 it runs in a process whose own runtime has not been tampered with, manifest
