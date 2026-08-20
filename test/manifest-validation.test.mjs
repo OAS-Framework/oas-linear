@@ -401,15 +401,75 @@ test("validator rejects a parenthesis-wrapped absolute path", (t) => {
   assert.match(result.stderr, /sets an absolute path \(setup: \/opt\/acme\/config\)/);
 });
 
-test("validator does not mistake a URL path for an absolute path", (t) => {
-  // Guard against over-rejection: the `//` in a URL is preceded by `:`, which
-  // is deliberately not a path boundary.
+test("validator traverses flow nesting to EVERY level the parser accepts", (t) => {
+  // yamlScalar has no depth limit, so any cap in the scanner is a level the
+  // kernel parses into a live value and the scan never sees.
+  const deep = "{ a: ".repeat(18) + "{ account: acme-inc }" + " }".repeat(18);
   const result = runFixture(t, withTemplate(
     "config-templates/default/oas-config.yaml",
-    PORTABLE_TEMPLATE + "      # see https://example.invalid/docs/setup for details\n",
+    PORTABLE_TEMPLATE + `      settings: ${deep}\n`,
   ));
-  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /sets the deployment-local key `account:`/);
 });
+
+test("validator traverses deeply nested inline arrays", (t) => {
+  const deep = "[{ a: ".repeat(12) + "[{ account: acme-inc }]" + " }]".repeat(12);
+  const result = runFixture(t, withTemplate(
+    "config-templates/default/oas-config.yaml",
+    PORTABLE_TEMPLATE + `      settings: ${deep}\n`,
+  ));
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /sets the deployment-local key `account:`/);
+});
+
+test("validator does not truncate a scalar at a non-comment '#'", (t) => {
+  // yamlScalar strips only a WHITESPACE-preceded '#', so `literal#text` keeps
+  // its hash and the `account:` after it is a live setting. Stripping at the
+  // first '#' would discard the rest of the line — a blind spot, not caution.
+  const result = runFixture(t, withTemplate(
+    "config-templates/default/oas-config.yaml",
+    PORTABLE_TEMPLATE + '      settings: { note: "literal#text", account: acme-inc }\n',
+  ));
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /sets the deployment-local key `account:`/);
+});
+
+for (const [label, scalar] of [
+  ["a semicolon", "run;/opt/acme/setup.sh"],
+  ["a pipe", "run|/opt/acme/setup.sh"],
+  ["an ampersand", "run&/opt/acme/setup.sh"],
+  ["a redirection operator", "run>/opt/acme/out.log"],
+]) {
+  test(`validator rejects an absolute path after ${label}`, (t) => {
+    // A config scalar is routinely a command line.
+    const result = runFixture(t, withTemplate(
+      "config-templates/default/oas-config.yaml",
+      PORTABLE_TEMPLATE + `      setup: ${scalar}\n`,
+    ));
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /sets an absolute path/);
+  });
+}
+
+// ── Over-rejection controls, as LIVE scalar values ──────────────────────────
+// These must exercise the value matcher itself, so none of them may hide in a
+// comment (which the scan skips before the matcher ever runs).
+for (const [label, line] of [
+  ["an https URL", "      docs: https://example.invalid/docs/setup"],
+  ["a protocol-relative URL", "      docs: //cdn.example.invalid/x"],
+  ["'//' used as prose", "      note: use // as an operator"],
+  ["a scope-relative path", "      injection-override: .agents/injections/linear.md"],
+  ["a trailing inline comment", "      from: installed  # not /opt/acme/x"],
+]) {
+  test(`validator accepts a template containing ${label}`, (t) => {
+    const result = runFixture(t, withTemplate(
+      "config-templates/default/oas-config.yaml",
+      PORTABLE_TEMPLATE + line + "\n",
+    ));
+    assert.equal(result.status, 0, result.stderr);
+  });
+}
 
 test("validator accepts relative paths and commented guidance in a template", (t) => {
   // Guard against over-rejection: a template MAY point at scope-relative paths

@@ -44,18 +44,28 @@ const ALWAYS = [
 
 /**
  * Where an absolute path may START inside a scalar: the beginning, or after
- * whitespace or an argument/punctuation boundary. `=` and brackets matter
- * because `--config=/opt/acme/x` and `(/opt/acme/x)` are ordinary ways to write
- * one. `:` is deliberately NOT a boundary, so the `//` in `https://host/path`
- * is not mistaken for a POSIX path.
+ * whitespace, an argument/assignment boundary, or shell punctuation. A config
+ * scalar is routinely a command line, so `--config=/opt/x`, `(/opt/x)`,
+ * `run;/opt/x` and `a|/opt/x` are all ordinary spellings.
+ *
+ * `:` is deliberately EXCLUDED so the `//` in `https://host/path` cannot be
+ * read as a POSIX path.
  */
-const BOUNDARY = `(?:^|[\\s=(\\[{,"'])`;
+const BOUNDARY = `(?:^|[\\s=(\\[{,;|&<>"'\`])`;
+/**
+ * The POSIX arm requires a real first segment character after the slash. That
+ * rejects `//` — an operator in prose, and the protocol-relative URL prefix —
+ * without needing to special-case either. (A single-segment numeric path in
+ * prose such as "divide by /2" would still match; the value pass only runs on
+ * UNCOMMENTED settings, where prose is unlikely, and under-matching a real
+ * `/opt` leak is the worse failure.)
+ */
 const ABSOLUTE_PATH = new RegExp(
   `${BOUNDARY}(`
-  + `\\/[^\\s)\\]},"']*`            // POSIX          /opt/acme/x
-  + `|[A-Za-z]:[\\\\/][^\\s)\\]},"']*` // Windows drive  C:\x  C:/x
-  + `|\\\\\\\\[^\\\\\\s]+\\\\[^\\s)\\]},"']*` // UNC       \\host\share\x
-  + `|~[\\\\/][^\\s)\\]},"']*`      // home-relative  ~/x
+  + `\\/[A-Za-z0-9._~@+-][^\\s)\\]},;|&<>"'\`]*`      // POSIX          /opt/acme/x
+  + `|[A-Za-z]:[\\\\/][^\\s)\\]},;|&<>"'\`]*`          // Windows drive  C:\x  C:/x
+  + `|\\\\\\\\[^\\\\\\s]+\\\\[^\\s)\\]},;|&<>"'\`]*` // UNC     \\host\share\x
+  + `|~[\\\\/][^\\s)\\]},;|&<>"'\`]*`                  // home-relative  ~/x
   + `)`,
 );
 
@@ -72,9 +82,19 @@ export const isAbsolutePathValue = (value) => {
   return Boolean(found) && String(value).trimStart().startsWith(found);
 };
 
-/** Strip line comments. Over-stripping a `#` inside a quoted scalar can only
- *  make the VALUES pass more permissive; the ALWAYS pass still sees raw text. */
-export const uncommented = (text) => text.split("\n").map((line) => line.replace(/#.*$/, "")).join("\n");
+/**
+ * Strip comments the way released 0.20 does, not more aggressively.
+ *
+ * `parseYamlNested` skips a line whose trimmed form starts with `#`, and
+ * `yamlScalar` strips only a WHITESPACE-PRECEDED `#` (`/\s+#.*$/`). So
+ * `note: literal#text` keeps its `#`, and truncating at the first `#` would
+ * discard the rest of the line — including any later live setting on it, as in
+ * `{ note: "literal#text", account: acme-inc }`. Stripping harder than the
+ * consumer does is not conservative here; it is a blind spot.
+ */
+export const uncommented = (text) => text.split("\n")
+  .map((line) => (line.trim().startsWith("#") ? "" : line.replace(/\s+#.*$/, "")))
+  .join("\n");
 
 const unquote = (value) => String(value).replace(/^(['"])([\s\S]*)\1$/, "$2").trim();
 
@@ -112,22 +132,31 @@ function flowChildren(value) {
   return [];
 }
 
-/** Every uncommented setting, flattened recursively through flow collections. */
+/**
+ * Every uncommented setting, flattened through flow collections to EVERY level.
+ *
+ * An iterative worklist rather than bounded recursion: `yamlScalar` has no
+ * depth limit, so any cap of ours is a level the kernel parses into a live
+ * value and we do not see. Termination comes from the input — each descent
+ * consumes the enclosing bracket pair, so the remaining string strictly
+ * shrinks.
+ */
 function scalarValues(text) {
   const found = [];
-  const visit = (key, value, depth = 0) => {
-    found.push({ key, value });
-    if (depth > 16) return; // pathological nesting is not worth chasing
-    for (const child of flowChildren(value)) visit(child.key, child.value, depth + 1);
-  };
+  const queue = [];
   for (const line of uncommented(text).split("\n")) {
     if (!line.trim()) continue;
     const pair = line.match(KEY_VALUE);
-    if (pair) { visit(unquote(pair[1]), unquote(pair[2])); continue; }
+    if (pair) { queue.push({ key: unquote(pair[1]), value: unquote(pair[2]) }); continue; }
     // Block-sequence item. Released 0.20's parser DROPS these (no colon on the
     // line), but the bytes are still copied — see POLICY SCOPE above.
     const item = line.match(/^\s*-\s+(\S[\s\S]*?)\s*$/);
-    if (item) visit(undefined, unquote(item[1]));
+    if (item) queue.push({ key: undefined, value: unquote(item[1]) });
+  }
+  while (queue.length) {
+    const entry = queue.shift();
+    found.push(entry);
+    queue.push(...flowChildren(entry.value));
   }
   return found;
 }
