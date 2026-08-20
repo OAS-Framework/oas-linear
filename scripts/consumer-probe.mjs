@@ -30,7 +30,7 @@
  *   OAS_PROBE_KEEP=1 node scripts/…                 # keep the sandbox
  */
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { createHash } from "node:crypto";
@@ -107,12 +107,27 @@ for (const tool of HOST_TOOLS) {
   else missingTools.push(tool);
 }
 
+/**
+ * POSIX shell single-quoting for a value embedded in generated script text.
+ *
+ * `JSON.stringify` is JAVASCRIPT quoting and was used here by mistake. It emits
+ * DOUBLE quotes, inside which `$`, backticks and `$(...)` stay live — so a
+ * sandbox path containing `$(touch PWNED)` executed on the stub's first run,
+ * and the redirect went to the expanded name instead of the real marker. Inside
+ * single quotes nothing is special; the only impossible character is `'`
+ * itself, closed and reintroduced as `'\''`.
+ */
+const shellQuote = (value) => `'${String(value).replaceAll("'", `'\\''`)}'`;
+
 /** A stub that is resolvable but must never actually run. */
 const writeStub = (name) => {
   const path = join(sandboxBin, name);
+  // EVERY dynamic value is shell-quoted, including `name` — not because these
+  // callers pass hostile names, but because the next caller should not have to
+  // work out which interpolations happen to be safe.
   writeFileSync(path, `#!/bin/sh
-echo "STUB ${name} WAS EXECUTED: $*" >> ${JSON.stringify(stubMarker)}
-echo "probe stub ${name} must never be executed" >&2
+printf '%s %s\n' ${shellQuote(`STUB ${name} WAS EXECUTED:`)} "$*" >> ${shellQuote(stubMarker)}
+printf '%s\n' ${shellQuote(`probe stub ${name} must never be executed`)} >&2
 exit 97
 `);
   chmodSync(path, 0o755);
@@ -590,6 +605,54 @@ check("spawn runs the advisory hook and composes the Linear briefing", () => {
   return `${spawn.result.instance}: launched:false, stub unexecuted, briefing, injection, skills, trust`;
 });
 
+check("stub generation is SHELL-quoted, not JavaScript-quoted", () => {
+  // Regression for a real injection: the marker path was embedded with
+  // JSON.stringify, whose DOUBLE quotes leave `$`, backticks and `$(...)` live.
+  // A sandbox path is temp-derived, so this was reachable from the environment,
+  // not just from a hostile caller. Build a stub whose every dynamic value is
+  // hostile and prove the exact path is written and nothing else runs.
+  // `: > file` is a shell BUILTIN plus a redirect, so it fires even though the
+  // probe's PATH is a short allowlist that has no `touch` — a $(touch ...)
+  // sentinel would be silently unfireable and the guard would prove nothing.
+  const nasty = join(sandbox, `hostile $(: >${join(sandbox, "PWNED-SUBST")}) \`: >${join(sandbox, "PWNED-TICK")}\` 'quoted' dir`);
+  mkdirSync(nasty, { recursive: true });
+  const marker = join(nasty, "marker with space.txt");
+  const script = join(nasty, "stub.sh");
+  writeFileSync(script, `#!/bin/sh
+printf '%s %s\n' ${shellQuote("STUB WAS EXECUTED:")} "$*" >> ${shellQuote(marker)}
+exit 97
+`);
+  chmodSync(script, 0o755);
+
+  const run = spawnSync("sh", [script, "an-arg"], { env: probeEnv(), encoding: "utf8" });
+  equal(run.status, 97, "the hostile-path stub must still run and exit 97");
+  assert(existsSync(marker), `the EXACT marker path must be written, got none at ${marker}`);
+  assert(readFileSync(marker, "utf8").includes("an-arg"), "the marker must record the arguments");
+  for (const sentinel of ["PWNED-SUBST", "PWNED-TICK"]) {
+    assert(!existsSync(join(sandbox, sentinel)),
+      `command substitution executed from the generated stub: ${sentinel}`);
+  }
+  return "hostile path: exact marker written, no substitution executed";
+});
+
+check("the hostile-path guard would catch JavaScript quoting", () => {
+  // Non-vacuity: the same stub built the OLD way must fail the same assertions,
+  // or the check above proves only that single-quoting is self-consistent.
+  const nasty = join(sandbox, "vacuity-check");
+  mkdirSync(nasty, { recursive: true });
+  const sentinel = join(sandbox, "PWNED-VACUITY");
+  const marker = join(nasty, `marker $(: >${sentinel}).txt`);
+  const script = join(nasty, "old-style.sh");
+  writeFileSync(script, `#!/bin/sh\necho "STUB WAS EXECUTED: $*" >> ${JSON.stringify(marker)}\nexit 97\n`);
+  chmodSync(script, 0o755);
+
+  spawnSync("sh", [script, "an-arg"], { env: probeEnv(), encoding: "utf8" });
+  assert(existsSync(sentinel), "JSON.stringify quoting MUST be exploitable, or this guard proves nothing");
+  assert(!existsSync(marker), "JSON.stringify quoting must also lose the exact marker");
+  rmSync(sentinel, { force: true });
+  return "JSON.stringify quoting confirmed exploitable — the guard above is real";
+});
+
 check("the stub would actually report an execution if one happened", () => {
   // Non-vacuity guard for the two assertions above: run the stub deliberately
   // and prove the marker mechanism fires, then clear it.
@@ -600,6 +663,83 @@ check("the stub would actually report an execution if one happened", () => {
   rmSync(stubMarker, { force: true });
   removeStub("pi");
   return "stub fails with exit 97 and records execution";
+});
+
+// ── 10. Git acquisition ─────────────────────────────────────────────────────
+step("10. pinned Git source and default package root");
+
+// Every other stage acquires the payload from a local DIRECTORY, which exercises
+// none of the source normalization, ref pinning or in-repository package-root
+// selection that the README's documented Git command depends on. A throwaway
+// repository plus a `file://` URL covers that without a network.
+const gitOrigin = join(sandbox, "git-origin");
+mkdirSync(gitOrigin, { recursive: true });
+const originGit = (...args) => run("git", ["-C", gitOrigin, ...args]);
+originGit("init", "-q", "-b", "main", ".");
+originGit("config", "user.email", "probe@example.invalid");
+originGit("config", "user.name", "consumer probe");
+cpSync(payloadRoot, join(gitOrigin, "oas-package"), { recursive: true });
+// A decoy at the root: the kernel must select oas-package/, not the repo root.
+writeFileSync(join(gitOrigin, "README.md"), "# not the package\n");
+originGit("add", "-A");
+originGit("commit", "-q", "-m", "probe fixture");
+originGit("tag", "probe-v2");
+const originCommit = run("git", ["-C", gitOrigin, "rev-parse", "HEAD"]).stdout.trim();
+const gitScope = join(sandbox, "git-scope");
+mkdirSync(gitScope, { recursive: true });
+
+check("the README's documented Git source spelling is ACCEPTED", () => {
+  const source = `file://${gitOrigin}@probe-v2`;
+  const result = oasJson("install", source, "--dir", gitScope, "--json");
+  assert(result.ok, `pinned Git install failed: ${JSON.stringify(result.error || result)}`);
+  return `installed from ${source}`;
+});
+
+check("a `git:`-PREFIXED URL is rejected, so the README must not document one", () => {
+  // Non-vacuity for the check above, and the actual defect: the README used to
+  // document `git:https://…`, which released 0.20 rejects outright — the `git:`
+  // prefix is shorthand for `git:host/org/repo`, not a scheme prefix.
+  const rejected = oasJson("install", `git:file://${gitOrigin}@probe-v2`, "--dir", join(sandbox, "git-scope-reject"), "--json");
+  assert(rejected._status !== 0, "a git:-prefixed URL must NOT install");
+  assert(rejected.ok === false, "the envelope must report failure");
+  equal(rejected.error && rejected.error.code, "invalid-source", "rejection code");
+  return `rejected as ${rejected.error.code}`;
+});
+
+check("the Git install locks the exact commit, ref, and selected package root", () => {
+  const lock = JSON.parse(readFileSync(join(gitScope, "oas-lock.json"), "utf8"));
+  const pkg = lock.packages["oas.linear"];
+  assert(pkg, "packages['oas.linear'] missing from the Git-sourced lock");
+  equal(pkg.commit, originCommit, "locked commit must be the exact tagged commit");
+  equal(pkg.path, "oas-package", "the package root inside the repository must be selected, not the repo root");
+  assert(pkg.source.startsWith("git:"), `locked source must normalize to a git: source, got ${pkg.source}`);
+  assert(pkg.source.includes("probe-v2"), `locked source must pin the ref, got ${pkg.source}`);
+  equal(lock.capabilities["oas.linear"].path, "capabilities/oas-linear", "capability root from a Git source");
+  return `commit ${originCommit.slice(0, 8)}, ref probe-v2, root oas-package`;
+});
+
+check("a Git-sourced install materializes the same artifact, and records its provenance", () => {
+  const gitArtifact = join(gitScope, ".agents", "capabilities", "installed", "oas.linear");
+  // `.oas-installation.json` records WHERE the artifact came from, so it MUST
+  // differ between a Git and a directory source. Everything else must not.
+  const PROVENANCE = ".oas-installation.json";
+  const strip = (snapshot) => Object.fromEntries(
+    Object.entries(snapshot).filter(([rel]) => rel !== PROVENANCE));
+  const fromGit = snapshotTree(gitArtifact);
+  const fromLocal = snapshotTree(installedDir);
+  assert(PROVENANCE in fromGit && PROVENANCE in fromLocal, `both artifacts must carry ${PROVENANCE}`);
+  equal(describeDrift(strip(fromLocal), strip(fromGit)), "",
+    "every file except the provenance record must be byte-identical");
+  assert(fromGit[PROVENANCE] !== fromLocal[PROVENANCE],
+    "the provenance record must actually differ, or this check compares nothing");
+
+  const provenance = JSON.parse(readFileSync(join(gitArtifact, PROVENANCE), "utf8"));
+  equal(provenance.commit, originCommit, "provenance commit");
+  equal(provenance.packagePath, "oas-package", "provenance package root");
+  equal(provenance.capabilityPath, "capabilities/oas-linear", "provenance capability root");
+  assert(provenance.source.startsWith("git:") && provenance.source.includes("probe-v2"),
+    `provenance source must be the pinned git source, got ${provenance.source}`);
+  return `${Object.keys(strip(fromGit)).length} files identical; provenance pins ${originCommit.slice(0, 8)}`;
 });
 
 // ── Report ──────────────────────────────────────────────────────────────────

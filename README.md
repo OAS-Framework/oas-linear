@@ -41,14 +41,19 @@ oas use oas.linear --global --dir /path/to/scope  # activate
 oas doctor /path/to/scope --soul <soul-name>
 ```
 
-A pinned Git source works the same way:
+A pinned Git source works the same way — note the raw URL, with no `git:`
+prefix:
 
 ```bash
-oas install git:https://github.com/OAS-Framework/oas-linear.git@v2.0.0 --dir /path/to/scope
+oas install https://github.com/OAS-Framework/oas-linear.git@v2.0.0 --dir /path/to/scope
 ```
 
+`git:` is shorthand for `git:host/org/repo`, not a scheme prefix, so
+`git:https://…` is rejected as an invalid source. The lock normalizes an
+accepted URL to a `git:` source itself and pins the exact commit behind the ref.
+
 The repository *contains* the package rather than being one: the payload is the
-`oas-package/` subtree, which is the default a `git:` source selects. The
+`oas-package/` subtree, which is the root a Git source selects by default. The
 repository's schemas, tests, CI, and owner soul stay outside the package's
 payload and integrity.
 
@@ -390,8 +395,19 @@ and nothing of the caller's OAS/pi context — and drives
 the distributed payload exactly as a consumer would: install → flat
 materialization → `lockfileVersion: 2` → exact restore → explicit template
 adoption and recorded base → per-capability trust → `oas linear` dispatch →
-`oas spawn` briefing, injection, and task-layer composition. Both run in CI on
-every pull request.
+`oas spawn` briefing, injection, and task-layer composition → pinned Git
+acquisition. Both run in CI on every pull request.
+
+The Git stage exists because every other stage installs from a local
+*directory*, which exercises none of the source normalization, ref pinning or
+in-repository package-root selection that the documented Git command above
+depends on. It builds a throwaway repository with the payload under
+`oas-package/` and a decoy at the root, installs from a `file://…@<ref>` source,
+and asserts the locked commit is the tagged one, the selected root is
+`oas-package`, and the artifact is byte-identical to the directory-sourced one
+apart from `.oas-installation.json`, which records provenance and therefore
+*must* differ. It also asserts the rejected `git:`-prefixed spelling fails with
+`invalid-source`, so the documented command cannot silently rot back.
 
 Host-executable isolation matters more than it looks: released 0.20 resolves the
 runtime binary *before* it honors `--no-launch`, so even a scaffold-only spawn
