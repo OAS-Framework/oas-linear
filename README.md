@@ -289,16 +289,17 @@ npm test     # test-script gate + manifest validation + unit tests
 npm run probe  # isolated consumer probe against a released kernel
 ```
 
-`npm test` names its suites explicitly rather than using `node --test`'s bare
+`npm test` runs its suites explicitly rather than using `node --test`'s bare
 discovery: this repository contains nested agent worktrees under
 `agents/<soul>/instances/<id>/work/`, and bare discovery would recursively
 execute those instances' stale suites, making a green run depend on which agent
 worktrees happen to exist on the machine.
-[`scripts/check-test-scripts.mjs`](scripts/check-test-scripts.mjs) enforces that
-before the runner starts. It parses nothing and detects nothing: it builds the
-`package.json` scripts block that this repository must have — with `test`
-naming every suite under `test/` in sorted order, and no options at all — and
-compares character for character.
+[`scripts/check-test-scripts.mjs`](scripts/check-test-scripts.mjs) is both the
+gate and the runner. It parses nothing and detects nothing: it builds the
+`package.json` scripts block that this repository must have and compares it
+character for character, then spawns the suites itself with the inventory of
+`test/` passed as **argv** (`shell: false`), so no shell ever re-reads a suite
+path.
 
 That bluntness is the result of four sharper designs failing, each to a spelling
 it did not model: a selection option whose *value* is a suite path
@@ -311,8 +312,28 @@ performs bare discovery while never looking like an invocation at all. Anything
 a gate merely fails to *recognize* is implicitly allowed, so this one recognizes
 nothing and compares everything. Changing what a script does means editing
 `canonicalScripts()` deliberately.
-[`test/npm-scripts.test.mjs`](test/npm-scripts.test.mjs) unit-tests the gate and
-keeps every historical bypass as a fixture.
+
+Three properties are not statements about the text and are enforced separately:
+
+- An **empty** inventory is refused. `node --test` with zero paths *is* bare
+  discovery, so a command built from an empty `test/` would otherwise compare
+  equal to itself and bless the defect.
+- A suite path outside a narrow plain-path grammar is refused. A file named
+  `test/ ; true #.test.mjs` spliced into a shell command would drop its own
+  suite and leave the run green; as argv it cannot, and the gate refuses the
+  name outright rather than relying on that.
+- npm resolves a lifecycle command *before* running it, so a noncanonical
+  `test` could rewrite `package.json` to canonical and only then call the gate.
+  The gate compares `npm_lifecycle_script` — the bytes npm actually loaded,
+  which no later rewrite can change. It cannot defend against an edit to
+  itself or a `pretest` that removes itself; `pretest`/`posttest` in the tree
+  are rejected as unexpected scripts, and the rest is what review is for.
+
+[`test/npm-scripts.test.mjs`](test/npm-scripts.test.mjs) unit-tests the gate,
+keeps every historical bypass as a fixture, and runs the real script
+end-to-end in a throwaway repository containing a decoy suite in a nested agent
+worktree — asserting both that the decoy does not run and that bare discovery
+*would* have run it.
 
 It validates both manifests against the vendored 0.20 schemas, enforces
 the dedicated-capability-root and config-template contracts, and exercises the
