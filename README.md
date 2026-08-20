@@ -299,7 +299,11 @@ descendant symlink cannot escape the capability root. Config-template
 portability uses the shared predicate in
 [`scripts/lib/config-portability.mjs`](scripts/lib/config-portability.mjs),
 which the consumer probe imports too, so the authoring gate and the consumer
-gate cannot drift apart.
+gate cannot drift apart. That predicate governs **copied bytes**, not only what
+the kernel parses: the supported YAML subset is a floor it must catch (quoted
+keys and nested flow collections included), and it deliberately reaches further
+— comments and block-sequence items are scanned too, because they land in the
+adopter's repository verbatim whether or not the parser honors them.
 
 `npm run probe` is the acceptance gate. It npm-installs a real released
 `@oas-framework/oas` (0.20.0 by default; override with `OAS_PROBE_VERSION`, or

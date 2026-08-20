@@ -301,10 +301,14 @@ for (const key of ["account", "workspace", "organization", "token"]) {
   });
 }
 
-// ── Review finding: the scanner matched a narrower YAML shape than the kernel ─
-// Released 0.20's parseYamlNested accepts a QUOTED key
-// (/^(\s*)((?:["']["'][^"']+["']["'])|(?:[^:#][^:]*?)):/ ... it strips the quotes),
-// so a quoted deployment-local key is a live setting and must be caught.
+// ── Config-template portability ─────────────────────────────────────────────
+// The policy is about COPIED BYTES, not exact parser parity: the kernel's
+// supported subset is a FLOOR (anything it would honor must be caught), and the
+// scan deliberately reaches further — comments and block-sequence items are
+// scanned even though released 0.20's parser ignores both, because they still
+// land verbatim in the adopter's repository. See scripts/lib/config-portability.mjs.
+//
+// FLOOR cases: forms released 0.20 turns into live values.
 for (const [label, line] of [
   ["a double-quoted deployment-local key", '      "account": acme-inc'],
   ["a single-quoted deployment-local key", "      'workspace': acme-inc"],
@@ -346,13 +350,65 @@ test("validator rejects an absolute path embedded mid-value", (t) => {
   assert.match(result.stderr, /sets an absolute path \(setup: \/opt\/acme\/setup\.sh\)/);
 });
 
-test("validator rejects an absolute path in a list item", (t) => {
+// BEYOND-FLOOR case, intentionally: released 0.20's parseYamlNested drops a
+// block-sequence item (the line carries no colon, so `items:` parses to `{}`),
+// yet the bytes are copied into the adopter's repository all the same. Rejected
+// under the copied-bytes policy, NOT claimed as parser parity.
+test("validator rejects an absolute path in a block-sequence item", (t) => {
   const result = runFixture(t, withTemplate(
     "config-templates/default/oas-config.yaml",
     PORTABLE_TEMPLATE + "      unconditional-injections:\n        - /opt/acme/x.md\n",
   ));
   assert.equal(result.status, 1);
   assert.match(result.stderr, /sets an absolute path/);
+});
+
+test("validator rejects a deployment-local key nested inside a flow mapping", (t) => {
+  // yamlScalar recurses into flow collections, so `{ a: { b: … } }` is a LIVE
+  // nested value — one level of descent is not enough.
+  const result = runFixture(t, withTemplate(
+    "config-templates/default/oas-config.yaml",
+    PORTABLE_TEMPLATE + "      settings: { nested: { account: acme-inc } }\n",
+  ));
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /sets the deployment-local key `account:`/);
+});
+
+test("validator rejects a deployment-local key inside an inline array", (t) => {
+  const result = runFixture(t, withTemplate(
+    "config-templates/default/oas-config.yaml",
+    PORTABLE_TEMPLATE + "      settings: [{ account: acme-inc }]\n",
+  ));
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /sets the deployment-local key `account:`/);
+});
+
+test("validator rejects an absolute path after an argument boundary", (t) => {
+  const result = runFixture(t, withTemplate(
+    "config-templates/default/oas-config.yaml",
+    PORTABLE_TEMPLATE + "      setup: bash --config=/opt/acme/config\n",
+  ));
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /sets an absolute path \(setup: \/opt\/acme\/config\)/);
+});
+
+test("validator rejects a parenthesis-wrapped absolute path", (t) => {
+  const result = runFixture(t, withTemplate(
+    "config-templates/default/oas-config.yaml",
+    PORTABLE_TEMPLATE + "      setup: run (/opt/acme/config)\n",
+  ));
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /sets an absolute path \(setup: \/opt\/acme\/config\)/);
+});
+
+test("validator does not mistake a URL path for an absolute path", (t) => {
+  // Guard against over-rejection: the `//` in a URL is preceded by `:`, which
+  // is deliberately not a path boundary.
+  const result = runFixture(t, withTemplate(
+    "config-templates/default/oas-config.yaml",
+    PORTABLE_TEMPLATE + "      # see https://example.invalid/docs/setup for details\n",
+  ));
+  assert.equal(result.status, 0, result.stderr);
 });
 
 test("validator accepts relative paths and commented guidance in a template", (t) => {
