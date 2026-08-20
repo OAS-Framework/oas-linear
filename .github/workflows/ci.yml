@@ -18,5 +18,19 @@ jobs:
           node-version: 22
       - name: Validate manifests and run unit tests
         run: npm test
-      - name: Consumer probe status
-        run: echo "PENDING(released-0.19.0-fixtures; package-runtime-api.md Consumer fixture) acquire -> lock -> trust -> activate -> spawn"
+
+  consumer-probe:
+    # Drives the DISTRIBUTED payload through a released kernel exactly as a
+    # consumer would: install -> flat materialization -> lockfileVersion 2 ->
+    # exact restore -> explicit template adoption -> per-capability trust ->
+    # `oas linear` dispatch -> spawn and task-layer composition.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Consumer probe against released @oas-framework/oas
+        env:
+          OAS_PROBE_VERSION: 0.20.0
+        run: npm run probe

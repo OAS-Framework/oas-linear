@@ -1,6 +1,50 @@
 # Schema status
 
-- **Corrected schemas verified**: all three vendored schemas are byte-identical to the canonical package-engine reference now merged to main (reviewed head `af49fd542e7190d1da72a6e0b9214036b59cbd7c`; package-engine merge `612b4f8c48efb63be7435df3d4473feba7b25abf`; package-config merge `a0366349915f151b6f6897cb682b7258f9fc1d79`); CI validates package and capability manifests against them.
-- `TODO(engine-consumer-fixtures)`: run the released OAS 0.19.0 acquire → lock → trust → activate → spawn probe when WS1 fixtures are available.
+The three schemas under `schemas/` are vendored copies of the canonical
+contract, kept here so CI can validate this package's manifests without a
+kernel checkout. They are **not** the source of truth — the released kernel is.
 
-No publication tag or catalog entry may be created while this item remains open.
+- **Verified against the RELEASE**: `schemas/oas-package.schema.json`,
+  `schemas/oas-lock.schema.json`, and `schemas/capability-manifest.schema.json`
+  are byte-identical to `@oas-framework/oas@0.20.0`'s
+  `docs/oas-package.schema.json`, `docs/oas-lock.schema.json`, and
+  `docs/capability-manifest.schema.json`. Re-check with:
+
+  ```bash
+  npm --prefix /tmp/oas020 install @oas-framework/oas@0.20.0
+  for f in oas-package oas-lock capability-manifest; do
+    diff /tmp/oas020/node_modules/@oas-framework/oas/docs/$f.schema.json schemas/$f.schema.json
+  done
+  ```
+
+- **Consumer gate CLOSED.** The previously open
+  `TODO(engine-consumer-fixtures)` item — "run the released acquire → lock →
+  trust → activate → spawn probe when fixtures are available" — no longer needs
+  fixtures. `scripts/consumer-probe.mjs` drives the distributed payload through
+  a real released `@oas-framework/oas@0.20.0` CLI in an isolated sandbox and
+  runs in CI on every pull request (`npm run probe`).
+
+## Known kernel defect observed by the probe (not package-side)
+
+Released 0.20.0 `oas doctor` prints
+
+```text
+WARNING: oas.linear at <scope>/.agents/capabilities/installed/oas.linear is in
+installed/ but has no lock entry — reacquire it or move it to owned/
+```
+
+for a correctly materialized capability under a valid `lockfileVersion: 2`
+lock. `bin/oas.mjs` compares materialized capability manifests against
+`readCapabilityLocks`, which reads only the **legacy v1** capability map, so
+every v2-materialized capability trips it. It is cosmetic and affects any v2
+package, not just this one. The package maintainer has confirmed it as a kernel
+defect and ruled that no package-side workaround may be added; the probe
+records the warning verbatim as evidence and does not treat it as a failure.
+
+## Version and compatibility
+
+`oas.linear` is at **2.0.0** with `compatibility.oas: ">=0.20.0"`. Raising the
+floor from `>=0.19.0` makes the package unconsumable by 0.19 kernels — a
+breaking consumer-contract change — so the package and its capability both move
+to 2.0.0 (the validator pins them equal). The published `v1.0.0` tag stays
+immutable and untouched for 0.19 consumers.

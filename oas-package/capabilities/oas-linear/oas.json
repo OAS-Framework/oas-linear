@@ -1,8 +1,8 @@
 {
   "capability": "oas.linear",
   "command": "linear",
-  "version": "1.0.0",
-  "compatibility": { "oas": ">=0.19.0" },
+  "version": "2.0.0",
+  "compatibility": { "oas": ">=0.20.0" },
   "layer": "tasks",
   "description": "Tasks layer via Linear: JSON-first GraphQL commands, project/issue/sub-issue workflow, label-based agent identity.",
   "requires": [],

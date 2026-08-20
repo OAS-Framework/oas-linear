@@ -23,26 +23,66 @@ The commands use Node's built-in `fetch` and add no external CLI or SDK dependen
 export LINEAR_API_KEY='lin_api_...'
 ```
 
-Start/resume agents from an environment that receives this variable. The spawn hook warns when it is absent; API commands fail with actionable authentication guidance rather than attempting login. The amended package schema and OAS `>=0.19.0` compatibility floor are frozen. See [`SCHEMA-STATUS.md`](SCHEMA-STATUS.md) for the remaining released-kernel fixture gate.
+Start/resume agents from an environment that receives this variable. The spawn hook warns when it is absent; API commands fail with actionable authentication guidance rather than attempting login.
 
-## Acquire and activate
+This is **`oas.linear` 2.0.0**, which requires OAS `>=0.20.0` — the capability-materialization contract. A 0.19 kernel cannot consume it; the immutable [`v1.0.0`](https://github.com/OAS-Framework/oas-linear/releases/tag/v1.0.0) tag stays available for `>=0.19.0` deployments. See [`SCHEMA-STATUS.md`](SCHEMA-STATUS.md) for the vendored-schema provenance and the one known kernel-side diagnostic defect.
 
-Acquisition does not activate the capability. After an official release exists:
+## Acquire, trust, activate
+
+Linear is an **adopter's deliberate choice**. It is never an implicit `oas.dev`
+dependency and never a default tasks provider — nothing acquires it for you.
+
+Acquisition does not activate the capability, and installing applies no config:
 
 ```bash
-oas install oas.linear --dir /path/to/scope
-oas trust oas.linear --dir /path/to/scope
-oas use oas.linear --global --dir /path/to/scope
+oas install oas.linear --dir /path/to/scope     # materialize + exact-lock
+oas trust oas.linear --dir /path/to/scope       # approve commands/hooks
+oas use oas.linear --global --dir /path/to/scope  # activate
 oas doctor /path/to/scope --soul <soul-name>
 ```
 
-A pinned Git source may be used after publication:
+A pinned Git source works the same way:
 
 ```bash
-oas install git:https://github.com/OAS-Framework/oas-linear.git@v1.0.0 --dir /path/to/scope
+oas install git:https://github.com/OAS-Framework/oas-linear.git@v2.0.0 --dir /path/to/scope
 ```
 
-The commands and spawn hook are executable, so they need explicit per-capability trust tied to the exact package integrity. Configure deployment-owned targeting and settings in `oas-config.yaml` (team is the Linear issue-prefix key; project is an optional briefing default):
+The repository *contains* the package rather than being one: the payload is the
+`oas-package/` subtree, which is the default a `git:` source selects. The
+repository's schemas, tests, CI, and owner soul stay outside the package's
+payload and integrity.
+
+Installation **materializes** the capability into
+`.agents/capabilities/installed/oas.linear/`, flat: that directory is
+`capabilities/oas-linear/` from this repository and nothing else, plus a
+generated `.oas-installation.json` provenance record. It is gitignored and
+reprojected from `oas-lock.json` by a bare `oas install`.
+
+The commands and spawn hook are executable, so they need explicit
+per-capability trust. **Trust binds to the materialized artifact's integrity**,
+never to package identity: any change to those bytes — including `oas update` —
+resets the approval and forces a fresh review.
+
+### Adopt the config template, or write your own
+
+The package ships one config template, `default`. It is a recommended starting
+point, not installed policy, and it carries no Linear API key, workspace,
+account, team key, project, or machine path — you fill those in. Adopt it
+explicitly:
+
+```bash
+oas init --package oas.linear --dir /path/to/scope   # adopts the "default" template
+```
+
+Adoption records the exact template as a commit-safe base under
+`.agents/config-templates/adopted/oas.linear/default/`, so `oas config diff` and
+`oas config sync` can compare against it later. What lands in your
+`oas-config.yaml` is then **yours**: every copied setting is editable, and
+package updates never rewrite it.
+
+Or configure it by hand. Targeting and settings are config-owned, never
+manifest-owned (team is the Linear issue-prefix key; project is an optional
+briefing default):
 
 ```yaml
 capabilities:
@@ -50,11 +90,9 @@ capabilities:
     tasks:
       capability: oas.linear
       from: installed
-      global:
-        enabled: true
-        settings:
-          team: ENG
-          project: Agent Platform
+      settings:
+        team: ENG
+        project: Agent Platform
 ```
 
 Verify the active command surface:
@@ -243,7 +281,25 @@ document mutations agents may perform and which remain human-only.
 ## Development
 
 ```bash
-npm test
+npm test     # manifest validation + unit tests
+npm run probe  # isolated consumer probe against a released kernel
 ```
 
-This validates both manifests, checks resource containment, and exercises the GraphQL wrapper and advisory hook against local mock servers. The full acquire → lock → trust → activate → spawn probe remains pending released OAS 0.19.0 consumer fixtures.
+`npm test` validates both manifests against the vendored 0.20 schemas, enforces
+the dedicated-capability-root and config-template contracts (including template
+portability), and exercises the GraphQL wrapper and advisory hook against local
+mock servers.
+
+`npm run probe` is the acceptance gate. It npm-installs a real released
+`@oas-framework/oas` (0.20.0 by default; override with `OAS_PROBE_VERSION`, or
+point `OAS_PROBE_CLI` at an existing binary), builds a throwaway scope with an
+isolated `HOME` and no OAS/pi environment inherited from the caller, and drives
+the distributed payload exactly as a consumer would: install → flat
+materialization → `lockfileVersion: 2` → exact restore → explicit template
+adoption and recorded base → per-capability trust → `oas linear` dispatch →
+`oas spawn` briefing, injection, and task-layer composition. Both run in CI on
+every pull request.
+
+Layout note: `oas-package/` is the exact distributed payload. Everything else in
+this repository — `schemas/`, `scripts/`, `test/`, CI, and the owner soul under
+`agents/` — is tooling that is never installed.

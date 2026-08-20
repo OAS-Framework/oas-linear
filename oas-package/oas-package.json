@@ -1,11 +1,18 @@
 {
   "package": "oas.linear",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Official OAS tasks integration for Linear with JSON-first GraphQL issue commands.",
   "compatibility": {
-    "oas": ">=0.19.0"
+    "oas": ">=0.20.0"
   },
   "capabilities": [
     "capabilities/oas-linear"
-  ]
+  ],
+  "configTemplates": {
+    "default": {
+      "path": "config-templates/default/oas-config.yaml",
+      "description": "Portable reference deployment that binds the tasks layer to oas.linear. Carries no Linear team key, project, account or credential — the adopter fills those into their own config.",
+      "default": true
+    }
+  }
 }
