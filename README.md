@@ -295,13 +295,27 @@ discovery: this repository contains nested agent worktrees under
 execute those instances' stale suites, making a green run depend on which agent
 worktrees happen to exist on the machine.
 [`scripts/check-test-scripts.mjs`](scripts/check-test-scripts.mjs) enforces that
-before the runner starts — no script may use bare discovery, `npm test` must
-name exactly the suites under `test/`, it may not pass a test-selection option
-(`--test-name-pattern`, `--test-skip-pattern`, `--test-shard`, `--test-only`),
-and the option grammar is **fail-closed**: an option the gate does not recognize
-is an error rather than an assumption, because an unknown value-taking option
-(`--redirect-warnings <path>`) would swallow suite paths and leave the real
-invocation discovering everything. The gate runs *outside* the test run on purpose: a filter such as
+before the runner starts. It does not interpret the command — it **constrains**
+it. Only the `test` script may run the runner, and its invocation must be
+exactly
+
+```text
+node --test <plain-suite-path> [<plain-suite-path> ...]
+```
+
+naming exactly the suites under `test/`, with no options, quoting, escaping, or
+shell expansion. Anything else is rejected on sight.
+
+The grammar is that narrow because interpreting the command kept losing to
+spellings it did not model: a selection option whose *value* is a suite path
+(`--test-name-pattern test/a.test.mjs`); an unenumerable value-taking option
+swallowing paths (`--redirect-warnings test/a.test.mjs`); and a backslash-escaped
+option (`\--redirect-warnings`), where the shell removes the escape and Node
+receives the real option while a tokenizer of the script text sees an inert
+word. Quoted paths are rejected too — not because they are dangerous in
+themselves, but because accepting quoting means modelling it, and that is the
+door the escape bypass came through. Widening the grammar is a deliberate edit
+with those failure modes in view. The gate runs *outside* the test run on purpose: a filter such as
 `--test-name-pattern` can exclude the very assertion that would report it, so an
 in-suite check cannot catch its own filtering. `test/npm-scripts.test.mjs`
 unit-tests the same helpers.
