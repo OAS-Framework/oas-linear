@@ -30,10 +30,12 @@
  *   OAS_PROBE_KEEP=1 node scripts/…                 # keep the sandbox
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { portabilityLeaks } from "./lib/config-portability.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const payloadRoot = join(repoRoot, "oas-package");
@@ -136,6 +138,35 @@ const installedDir = join(scope, ".agents", "capabilities", "installed", "oas.li
 // macOS hands out /var/folders/… temp dirs that the kernel canonicalizes to
 // /private/var/folders/…, so a path the kernel reports back is compared against
 // BOTH spellings rather than the one this process happened to build.
+/** Relative paths of every file in a tree. */
+const walk = (dir, prefix = "") => readdirSync(dir, { withFileTypes: true }).flatMap((entry) => (
+  entry.isDirectory() ? walk(join(dir, entry.name), `${prefix}${entry.name}/`) : [`${prefix}${entry.name}`]
+));
+
+/**
+ * A content snapshot of a materialized artifact: every relative path mapped to
+ * its kind, mode, and either its symlink target or a hash of its bytes.
+ * Comparing lock integrity strings proves only that the LOCK did not move;
+ * proving the restored BYTES are the same needs an independent record.
+ */
+const snapshotTree = (dir) => {
+  const snapshot = {};
+  for (const rel of walk(dir).sort()) {
+    const path = join(dir, rel);
+    const stat = lstatSync(path);
+    if (stat.isSymbolicLink()) { snapshot[rel] = `symlink:${readlinkSync(path)}`; continue; }
+    const mode = (stat.mode & 0o777).toString(8);
+    snapshot[rel] = `file:${mode}:${createHash("sha256").update(readFileSync(path)).digest("hex")}`;
+  }
+  return snapshot;
+};
+const describeDrift = (before, after) => {
+  const keys = [...new Set([...Object.keys(before), ...Object.keys(after)])].sort();
+  return keys.filter((k) => before[k] !== after[k])
+    .map((k) => `${k}: ${before[k] === undefined ? "ADDED" : after[k] === undefined ? "MISSING" : "CHANGED"}`)
+    .join("; ");
+};
+
 const artifactRoots = () => [...new Set([installedDir, existsSync(installedDir) ? realpathSync(installedDir) : installedDir])];
 const insideArtifact = (path) => artifactRoots().some((root) => path === root || path.startsWith(root + sep));
 
@@ -145,9 +176,6 @@ check("install succeeds", () => {
 });
 
 check("the materialized artifact is the capability root ALONE (flat)", () => {
-  const walk = (dir, prefix = "") => readdirSync(dir, { withFileTypes: true }).flatMap((entry) => (
-    entry.isDirectory() ? walk(join(dir, entry.name), `${prefix}${entry.name}/`) : [`${prefix}${entry.name}`]
-  ));
   const materialized = walk(installedDir).sort();
   const authored = walk(join(payloadRoot, "capabilities", "oas-linear")).sort();
   // The engine adds exactly one file: the generated provenance record.
@@ -204,10 +232,24 @@ check("installation writes no oas-config.yaml and no adopted base", () => {
   return "config templates stay optional source material";
 });
 
-check("install reports the template as an available follow-up", () => {
+check("install locks the capability, adopts nothing, and points at the trust gate", () => {
   const human = oas("install", payloadRoot, "--dir", scope);
   assert(human.status === 0, `re-install failed: ${human.stderr}`);
-  return "re-install is idempotent";
+  const output = human.stdout + human.stderr;
+  assert(/oas\.linear@2\.0\.0/.test(output), "install must name the locked capability and version");
+  assert(/nothing activated/.test(output), "install must state that it activated nothing");
+  assert(/oas trust oas\.linear/.test(output), "install must point at the separate trust gate");
+  assert(!existsSync(join(scope, "oas-config.yaml")), "re-install must still not write a config");
+  // KERNEL/DOC DIVERGENCE (released 0.20.0): docs/packages.md says `oas install`
+  // "materializes capabilities and reports available templates as optional
+  // follow-ups", but no install path emits them — the `Config template "…"`
+  // note lives only in the `oas init --package` adoption path. Recorded as
+  // evidence; asserting the documented behavior would fail against the release,
+  // and asserting nothing would hide the gap.
+  if (!/Config template/.test(output)) {
+    process.stdout.write("       KERNEL/DOC DIVERGENCE (not package-side): `oas install` does not report available config templates, though docs/packages.md says it does\n");
+  }
+  return "locks, activates nothing, names the trust gate";
 });
 
 // ── 4. Ignore behavior ──────────────────────────────────────────────────────
@@ -228,17 +270,39 @@ check("only installed/ is ignored; owned/ and adopted templates are committable"
 // ── 5. Exact restore ────────────────────────────────────────────────────────
 step("5. exact restore");
 check("bare install reprojects the artifact byte-identically and never advances the lock", () => {
-  const before = readFileSync(lockPath, "utf8");
+  const lockBefore = readFileSync(lockPath, "utf8");
   const integrityBefore = readLock().capabilities["oas.linear"].integrity;
+  // Independent record of the actual BYTES. The lock's integrity string only
+  // proves the lock did not move; a restore that dropped or corrupted every
+  // file but oas.json would leave it untouched.
+  const treeBefore = snapshotTree(installedDir);
+  assert(Object.keys(treeBefore).length > 1, "snapshot should cover the whole artifact");
+
   rmSync(installedDir, { recursive: true, force: true });
   assert(!existsSync(installedDir), "artifact should be gone before restore");
   const restore = oasJson("install", "--dir", scope, "--json");
   assert(restore.ok, `bare restore failed: ${JSON.stringify(restore.error || restore)}`);
-  assert(existsSync(join(installedDir, "oas.json")), "restore must re-materialize the artifact");
-  const after = readFileSync(lockPath, "utf8");
-  equal(after, before, "the lock must be byte-identical after a bare restore");
+
+  const treeAfter = snapshotTree(installedDir);
+  const drift = describeDrift(treeBefore, treeAfter);
+  assert(!drift, `restored artifact differs from the original bytes — ${drift}`);
+  equal(readFileSync(lockPath, "utf8"), lockBefore, "the lock must be byte-identical after a bare restore");
   equal(readLock().capabilities["oas.linear"].integrity, integrityBefore, "restored artifact integrity");
-  return `integrity unchanged at ${integrityBefore.slice(0, 14)}…`;
+  return `${Object.keys(treeAfter).length} files byte-identical; lock unchanged`;
+});
+
+check("the restore comparison would actually catch a corrupted artifact", () => {
+  // Guard against a vacuous check: mutate one file and prove the snapshot
+  // comparison notices, then restore the real bytes.
+  const victim = join(installedDir, "oas.json");
+  const original = readFileSync(victim);
+  const treeBefore = snapshotTree(installedDir);
+  writeFileSync(victim, original.toString() + "\n");
+  const drift = describeDrift(treeBefore, snapshotTree(installedDir));
+  writeFileSync(victim, original);
+  assert(/oas\.json: CHANGED/.test(drift), `snapshot comparison failed to notice a mutated file (drift: ${drift || "none"})`);
+  assert(!describeDrift(treeBefore, snapshotTree(installedDir)), "restoring the original bytes should clear the drift");
+  return "one-byte mutation detected";
 });
 
 // ── 6. Explicit adoption and the adopted base ───────────────────────────────
@@ -273,15 +337,16 @@ check("adoption metadata leaks no machine path for a local source", () => {
 });
 
 check("the adopted config carries no credential and no provider-local identity", () => {
+  // Same predicate the manifest validator uses (scripts/lib), so the gate the
+  // package ships under and the gate a consumer actually experiences cannot
+  // drift apart.
   const text = readFileSync(join(scope, "oas-config.yaml"), "utf8");
-  const uncommented = text.split("\n").map((line) => line.replace(/#.*$/, "")).join("\n");
-  assert(!/lin_api_[A-Za-z0-9]/.test(text), "template contains a Linear API key");
-  assert(!/https:\/\/linear\.app\//.test(text), "template contains a workspace-local linear.app URL");
-  assert(!/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i.test(text), "template contains a provider UUID");
-  assert(!/(^|\n)\s*(api[_-]?key|token|secret|password)\s*:\s*\S/i.test(uncommented), "template sets a credential");
-  assert(!/(^|\n)\s*team\s*:\s*\S/.test(uncommented), "template sets a team");
-  assert(!/(^|\n)\s*project\s*:\s*\S/.test(uncommented), "template sets a project");
-  assert(/capability:\s*oas\.linear/.test(uncommented), "template must bind the tasks layer to oas.linear");
+  const leaks = portabilityLeaks(text);
+  assert(!leaks.length, `adopted config is not portable — it ${leaks.join("; it ")}`);
+  assert(/capability:\s*oas\.linear/.test(text), "template must bind the tasks layer to oas.linear");
+  // Guard against a vacuous check: the predicate must actually fire on a leak.
+  const seeded = portabilityLeaks(text + "      injection-override: /opt/acme/linear.md\n");
+  assert(seeded.length, "the portability predicate failed to flag a seeded absolute path");
   return "portable: no key, account, workspace URL, ID, or machine path";
 });
 
@@ -318,23 +383,59 @@ check("trust survives an exact restore of the same bytes", () => {
 
 // ── 8. Linear command surface ───────────────────────────────────────────────
 step("8. Linear command surface");
+// Every command the SHIPPED manifest declares — read from the manifest rather
+// than hardcoded, so a command added later cannot silently escape the probe.
+const declaredCommands = Object.keys(
+  JSON.parse(readFileSync(join(payloadRoot, "capabilities", "oas-linear", "oas.json"), "utf8")).commands,
+);
+
 check("the linear namespace dispatches every declared command", () => {
   const usage = oas("linear");
   equal(usage.status, 0, "bare namespace exit code");
-  assert(/commands: auth, teams, states, projects, labels, issue/.test(usage.stderr + usage.stdout),
-    `unexpected usage output: ${usage.stderr || usage.stdout}`);
-  return "auth, teams, states, projects, labels, issue";
+  const output = usage.stderr + usage.stdout;
+  for (const command of declaredCommands) {
+    assert(new RegExp(`\\b${command}\\b`).test(output), `usage must list "${command}", got: ${output.trim()}`);
+  }
+  return declaredCommands.join(", ");
 });
 
-check("commands fail cleanly and actionably without LINEAR_API_KEY", () => {
-  for (const command of ["auth", "teams"]) {
-    const result = oas("linear", command);
+// Arguments each command needs to get PAST its own usage validation and reach
+// the authentication gate. Usage validation deliberately runs first, so a
+// command invoked bare reports the missing flag rather than the missing key.
+const REQUIRED_ARGS = {
+  auth: [],
+  teams: [],
+  states: ["--team", "ENG"],
+  projects: ["--team", "ENG"],
+  labels: ["--team", "ENG"],
+  issue: ["list", "--team", "ENG"],
+};
+
+check("EVERY declared command fails cleanly and actionably without LINEAR_API_KEY", () => {
+  for (const command of declaredCommands) {
+    const args = REQUIRED_ARGS[command];
+    assert(args !== undefined, `probe has no argument recipe for declared command "${command}" — add one`);
+    const result = oas("linear", command, ...args);
     equal(result.status, 1, `\`oas linear ${command}\` exit code`);
-    const payload = JSON.parse(result.stdout.trim() || result.stderr.trim());
-    assert(/LINEAR_API_KEY/.test(payload.error), `\`oas linear ${command}\` must name LINEAR_API_KEY, got ${payload.error}`);
+    const raw = result.stdout.trim() || result.stderr.trim();
+    let payload;
+    try { payload = JSON.parse(raw); }
+    catch { throw new Error(`\`oas linear ${command}\` must fail with JSON, got: ${raw}`); }
+    assert(/LINEAR_API_KEY/.test(payload.error),
+      `\`oas linear ${command} ${args.join(" ")}\` must reach the auth gate and name LINEAR_API_KEY, got ${payload.error}`);
+    assert(payload.details, `\`oas linear ${command}\` must carry actionable details`);
     assert(!/lin_api_/.test(result.stdout + result.stderr), "no key material may appear in output");
   }
-  return "JSON error naming LINEAR_API_KEY, exit 1, no network login attempt";
+  return `${declaredCommands.length} commands: JSON error naming LINEAR_API_KEY, exit 1, no login attempt`;
+});
+
+check("a command missing a required flag reports the FLAG, not the missing key", () => {
+  const result = oas("linear", "states");
+  equal(result.status, 1, "`oas linear states` (no --team) exit code");
+  const payload = JSON.parse(result.stdout.trim() || result.stderr.trim());
+  assert(/--team <KEY> is required/.test(payload.error),
+    `usage validation must precede authentication, got ${payload.error}`);
+  return "usage validation precedes authentication";
 });
 
 // ── 9. Spawn and task-layer composition ─────────────────────────────────────

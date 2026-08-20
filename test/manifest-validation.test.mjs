@@ -23,10 +23,11 @@ function runFixture(t, options = {}) {
   const { capabilities, capabilityExtra = {}, manifestExtra = {}, files = {}, symlinks = {} } = options;
   const fixture = mkdtempSync(join(tmpdir(), "oas-manifest-negative-"));
   t.after(() => rmSync(fixture, { recursive: true, force: true }));
-  mkdirSync(join(fixture, "scripts"), { recursive: true });
+  mkdirSync(join(fixture, "scripts", "lib"), { recursive: true });
   mkdirSync(join(fixture, "schemas"), { recursive: true });
   mkdirSync(join(fixture, "oas-package"), { recursive: true });
   copyFileSync(join(ROOT, "scripts", "validate-manifests.mjs"), join(fixture, "scripts", "validate-manifests.mjs"));
+  copyFileSync(join(ROOT, "scripts", "lib", "config-portability.mjs"), join(fixture, "scripts", "lib", "config-portability.mjs"));
   copyFileSync(join(ROOT, "schemas", "oas-package.schema.json"), join(fixture, "schemas", "oas-package.schema.json"));
   copyFileSync(join(ROOT, "schemas", "capability-manifest.schema.json"), join(fixture, "schemas", "capability-manifest.schema.json"));
 
@@ -215,7 +216,7 @@ test("validator rejects a config template carrying a machine path", (t) => {
     PORTABLE_TEMPLATE + "      injection-override: /Users/someone/.agents/injections/linear.md\n",
   ));
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /contains an absolute machine path/);
+  assert.match(result.stderr, /contains a home-rooted machine path/);
 });
 
 test("validator rejects a config template carrying a provider-local UUID", (t) => {
@@ -242,7 +243,7 @@ test("validator rejects a config template that sets a team", (t) => {
     PORTABLE_TEMPLATE.replace("      #   team: ENG", "      settings:\n        team: ENG"),
   ));
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /sets a `team:` value/);
+  assert.match(result.stderr, /sets the deployment-local key `team:`/);
 });
 
 test("validator rejects a config template that sets a credential", (t) => {
@@ -251,7 +252,127 @@ test("validator rejects a config template that sets a credential", (t) => {
     PORTABLE_TEMPLATE + "      api_key: something\n",
   ));
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /sets a credential setting/);
+  assert.match(result.stderr, /sets the deployment-local key `api_key:`/);
+});
+
+// ── Review finding: lexical containment was bypassable with a symlink ───────
+test("validator rejects a config template symlinked INTO a capability root", (t) => {
+  // The declared path sits under config-templates/, but resolves into the
+  // capability root — so it WOULD be materialized as capability bytes, counted
+  // in the artifact integrity, and covered by executable trust.
+  const result = runFixture(t, {
+    capabilities: ["capabilities/thing"],
+    capabilityExtra: MATCHING_IDENTITY,
+    manifestExtra: { configTemplates: { default: { path: "config-templates/default/oas-config.yaml" } } },
+    files: { "capabilities/thing/template.yaml": PORTABLE_TEMPLATE },
+    symlinks: { "config-templates/default/oas-config.yaml": "capabilities/thing/template.yaml" },
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /must live outside every capability root \(resolves inside capabilities\/thing\)/);
+});
+
+// ── Review finding: the portability scan missed most absolute-path dialects ──
+for (const [label, value] of [
+  ["a POSIX path outside home", "/opt/acme/linear.md"],
+  ["a temp path", "/tmp/linear.md"],
+  ["a Windows drive path with forward slashes", "C:/acme/linear.md"],
+  ["a Windows drive path with backslashes", "C:\\acme\\linear.md"],
+  ["a UNC path", "\\\\fileserver\\share\\linear.md"],
+  ["a home-relative path", "~/acme/linear.md"],
+]) {
+  test(`validator rejects a config template setting ${label}`, (t) => {
+    const result = runFixture(t, withTemplate(
+      "config-templates/default/oas-config.yaml",
+      PORTABLE_TEMPLATE + `      injection-override: ${value}\n`,
+    ));
+    assert.equal(result.status, 1, `expected rejection for ${value}`);
+    assert.match(result.stderr, /sets an absolute path/);
+  });
+}
+
+for (const key of ["account", "workspace", "organization", "token"]) {
+  test(`validator rejects a config template setting the deployment-local key ${key}`, (t) => {
+    const result = runFixture(t, withTemplate(
+      "config-templates/default/oas-config.yaml",
+      PORTABLE_TEMPLATE + `      ${key}: acme-inc\n`,
+    ));
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, new RegExp(`sets the deployment-local key \\\`${key}:`));
+  });
+}
+
+test("validator accepts relative paths and commented guidance in a template", (t) => {
+  // Guard against over-rejection: a template MAY point at scope-relative paths
+  // and MAY carry commented scaffolding naming the values an adopter fills in.
+  const result = runFixture(t, withTemplate(
+    "config-templates/default/oas-config.yaml",
+    PORTABLE_TEMPLATE
+      + "      injection-override: .agents/injections/oas-linear/linear.md\n"
+      + "      # settings:\n      #   team: ENG\n      #   project: Agent Platform\n",
+  ));
+  assert.equal(result.status, 0, result.stderr);
+});
+
+// ── Wave parity audit: released 0.20 is asymmetric on agents[] vs skills[] ───
+test("validator rejects an agents[] entry that is a FILE (released-0.20 parity)", (t) => {
+  // The released kernel throws "capability-defined agent ... is not a
+  // directory". A validator that only walked-if-directory would green-light a
+  // package that `oas install` refuses.
+  const result = runFixture(t, {
+    capabilities: ["capabilities/thing"],
+    capabilityExtra: { ...MATCHING_IDENTITY, agents: ["agents/reviewer.md"] },
+    files: { "capabilities/thing/agents/reviewer.md": "# a soul file, not a soul directory\n" },
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /capability-defined agent must be a directory/);
+});
+
+test("validator accepts an agents[] entry that is a DIRECTORY (released-0.20 parity)", (t) => {
+  const result = runFixture(t, {
+    capabilities: ["capabilities/thing"],
+    capabilityExtra: { ...MATCHING_IDENTITY, agents: ["agents/reviewer"] },
+    files: { "capabilities/thing/agents/reviewer/AGENTS.md": "# soul\n" },
+  });
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test("validator accepts a skills[] entry that is a FILE (released-0.20 parity)", (t) => {
+  // Deliberately NOT symmetric with agents[]: the released kernel walks a
+  // skills entry only when it is a directory and accepts a file.
+  const result = runFixture(t, {
+    capabilities: ["capabilities/thing"],
+    capabilityExtra: { ...MATCHING_IDENTITY, skills: ["skills/s/SKILL.md"] },
+    files: { "capabilities/thing/skills/s/SKILL.md": "# skill\n" },
+  });
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test("validator rejects a DESCENDANT symlink escaping the capability root", (t) => {
+  // The declared tree resolves inside the capability root, but a file within it
+  // points at package-only bytes materialization never copies. The released
+  // kernel rejects this; a check on the declared path alone would miss it.
+  const result = runFixture(t, {
+    capabilities: ["capabilities/thing"],
+    capabilityExtra: { ...MATCHING_IDENTITY, skills: ["skills"] },
+    files: {
+      "capabilities/thing/skills/s/SKILL.md": "# skill\n",
+      "shared/leaked.md": "# package-only, never materialized\n",
+    },
+    symlinks: { "capabilities/thing/skills/s/leaked.md": "shared/leaked.md" },
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /skill tree contains a path escaping the capability root/);
+});
+
+test("validator rejects a broken symlink inside a declared tree", (t) => {
+  const result = runFixture(t, {
+    capabilities: ["capabilities/thing"],
+    capabilityExtra: { ...MATCHING_IDENTITY, skills: ["skills"] },
+    files: { "capabilities/thing/skills/s/SKILL.md": "# skill\n" },
+    symlinks: { "capabilities/thing/skills/s/gone.md": "capabilities/thing/skills/s/never-written.md" },
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /skill tree contains a broken symlink/);
 });
 
 test("validator rejects a config template that does not exist", (t) => {

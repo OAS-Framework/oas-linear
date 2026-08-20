@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { portabilityLeaks } from "./lib/config-portability.mjs";
 
 // Repo root holds dev tooling (scripts/, schemas/); the DISTRIBUTED package
 // payload lives in the `oas-package/` subtree. Manifests and their resources
@@ -51,13 +52,42 @@ function validateSchema(value, schema, at) {
 // .agents/capabilities/installed/<id>/, so a capability resource that resolves
 // into package-only territory simply is not there at runtime.
 function safeResource(base, candidate, at, kind = "path", boundary = root, boundaryLabel = "package root") {
-  if (typeof candidate !== "string" || !candidate.trim()) { report(at, `${kind} must be a non-empty string`); return; }
-  if (isAbsolute(candidate) || candidate.split(/[\\/]+/).includes("..")) { report(at, `${kind} must be package-relative and may not contain '..'`); return; }
+  if (typeof candidate !== "string" || !candidate.trim()) { report(at, `${kind} must be a non-empty string`); return false; }
+  if (isAbsolute(candidate) || candidate.split(/[\\/]+/).includes("..")) { report(at, `${kind} must be package-relative and may not contain '..'`); return false; }
   const target = resolve(base, candidate);
-  if (!existsSync(target)) { report(at, `${kind} does not exist: ${candidate}`); return; }
+  if (!existsSync(target)) { report(at, `${kind} does not exist: ${candidate}`); return false; }
   const realBoundary = realpathSync(boundary);
   const realTarget = realpathSync(target);
-  if (realTarget !== realBoundary && !realTarget.startsWith(realBoundary + sep)) report(at, `${kind} escapes the ${boundaryLabel} after symlink resolution`);
+  if (realTarget !== realBoundary && !realTarget.startsWith(realBoundary + sep)) {
+    report(at, `${kind} escapes the ${boundaryLabel} after symlink resolution`);
+    return false;
+  }
+  return true;
+}
+
+/** Walk a DECLARED directory tree and bound every descendant by the capability
+ *  root. The declared path resolving inside the root is not enough: a
+ *  descendant symlink can still point at package-only bytes that
+ *  materialization never copies, and the released kernel rejects exactly that
+ *  ("contains a path escaping its capability root"). A visited set keeps
+ *  contained link cycles from looping. */
+function walkContained(capabilityRoot, dir, at, kind, visited = new Set()) {
+  if (!statSync(dir).isDirectory()) return;
+  const realBoundary = realpathSync(capabilityRoot);
+  const realDir = realpathSync(dir);
+  if (visited.has(realDir)) return;
+  visited.add(realDir);
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const child = join(dir, entry.name);
+    let realChild;
+    try { realChild = realpathSync(child); }
+    catch { report(at, `${kind} contains a broken symlink: ${relative(capabilityRoot, child)}`); continue; }
+    if (realChild !== realBoundary && !realChild.startsWith(realBoundary + sep)) {
+      report(at, `${kind} contains a path escaping the capability root: ${relative(capabilityRoot, child)} → ${realChild}`);
+      continue;
+    }
+    if (statSync(realChild).isDirectory()) walkContained(capabilityRoot, realChild, at, kind, visited);
+  }
 }
 
 const packagePath = join(root, "oas-package.json");
@@ -105,33 +135,20 @@ for (const [name, spec] of Object.entries(templates)) {
   if (!statSync(target).isFile()) { report(at, "config template must be a file"); continue; }
   // A template is package SOURCE MATERIAL and is never materialized. Shipping
   // one inside a capability root would silently install it as capability bytes.
+  // Compare REAL paths: a lexical comparison is bypassable with a symlink whose
+  // target sits inside a capability root, which is exactly the case that
+  // matters here because such a template WOULD be materialized.
+  const realTemplate = realpathSync(target);
   for (const capabilityRoot of capabilityRootDirs) {
-    if (target === capabilityRoot || target.startsWith(capabilityRoot + sep)) {
-      report(at, `config template must live outside every capability root (found inside ${relative(root, capabilityRoot)})`);
+    if (!existsSync(capabilityRoot)) continue;
+    const realCapabilityRoot = realpathSync(capabilityRoot);
+    if (realTemplate === realCapabilityRoot || realTemplate.startsWith(realCapabilityRoot + sep)) {
+      report(at, `config template must live outside every capability root (resolves inside ${relative(root, capabilityRoot)})`);
     }
   }
-  // Portability: a template is copied verbatim into somebody else's repository
-  // and committed there, so it may carry no credential, account, workspace URL,
-  // provider-local ID, or machine path. Comments count — they are copied too.
-  const text = readFileSync(target, "utf8");
-  const uncommented = text.split("\n").map((line) => line.replace(/#.*$/, "")).join("\n");
-  const leaks = [
-    [/lin_api_[A-Za-z0-9]/, "a Linear API key"],
-    [/(^|[\s"'])(\/Users\/|\/home\/|\/root\/|[A-Za-z]:\\)/, "an absolute machine path"],
-    [/https:\/\/linear\.app\/[^\s"']+/, "a workspace-local linear.app URL"],
-    [/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i, "a provider-local UUID"],
-  ];
-  for (const [pattern, what] of leaks) {
-    if (pattern.test(text)) report(at, `config template must stay portable but contains ${what}`);
-  }
-  // These must be present only as commented guidance for the adopter to fill in.
-  const settings = [
-    [/(^|\n)\s*(api[_-]?key|token|secret|password)\s*:\s*\S/i, "a credential setting"],
-    [/(^|\n)\s*team\s*:\s*\S/, "a `team:` value (the adopter's Linear issue-prefix key)"],
-    [/(^|\n)\s*project\s*:\s*\S/, "a `project:` value (the adopter's Linear project)"],
-  ];
-  for (const [pattern, what] of settings) {
-    if (pattern.test(uncommented)) report(at, `config template must stay portable but sets ${what}`);
+  // Portability — one shared predicate with the consumer probe (scripts/lib).
+  for (const leak of portabilityLeaks(readFileSync(target, "utf8"))) {
+    report(at, `config template must stay portable but ${leak}`);
   }
 }
 
@@ -161,9 +178,29 @@ for (const [index, capabilityDir] of declaredCapabilities.entries()) {
   const capabilityRoot = dirname(manifestPath);
   // Self-containment: the materialized artifact is this directory alone, so
   // every declared path is resolved AND bounded by it.
-  for (const [resourceIndex, resource] of (manifest.skills || []).entries()) safeResource(capabilityRoot, resource, `${capabilityDir}/oas.json.skills[${resourceIndex}]`, "skill path", capabilityRoot, "capability root");
+  for (const [resourceIndex, resource] of (manifest.skills || []).entries()) {
+    const at = `${capabilityDir}/oas.json.skills[${resourceIndex}]`;
+    if (safeResource(capabilityRoot, resource, at, "skill path", capabilityRoot, "capability root")) {
+      // A skills entry may be a file OR a directory — the released kernel walks
+      // it only when it is a directory. Parity: same rule here.
+      walkContained(capabilityRoot, resolve(capabilityRoot, resource), at, "skill tree");
+    }
+  }
   if (manifest.inject) safeResource(capabilityRoot, manifest.inject, `${capabilityDir}/oas.json.inject`, "injection path", capabilityRoot, "capability root");
-  for (const [agentIndex, agent] of (manifest.agents || []).entries()) safeResource(capabilityRoot, agent, `${capabilityDir}/oas.json.agents[${agentIndex}]`, "agent path", capabilityRoot, "capability root");
+  for (const [agentIndex, agent] of (manifest.agents || []).entries()) {
+    const at = `${capabilityDir}/oas.json.agents[${agentIndex}]`;
+    if (!safeResource(capabilityRoot, agent, at, "agent path", capabilityRoot, "capability root")) continue;
+    // ASYMMETRY WITH skills[], and it is the released kernel's, not ours: a
+    // capability-defined agent MUST resolve to a soul DIRECTORY. The 0.20
+    // kernel rejects a non-directory outright ("capability-defined agent ... is
+    // not a directory"), so a validator that merely walks-if-directory would
+    // green-light a package that install refuses.
+    if (!statSync(resolve(capabilityRoot, agent)).isDirectory()) {
+      report(at, "capability-defined agent must be a directory (a soul directory), not a file");
+      continue;
+    }
+    walkContained(capabilityRoot, resolve(capabilityRoot, agent), at, "capability-defined agent");
+  }
   // A hook may be a plain "entrypoint args" string or the object form
   // { command, required } (only the spawn hook may set required). Commands are
   // always strings. Reduce either to the executable entrypoint for containment.

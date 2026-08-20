@@ -24,7 +24,7 @@ kernel checkout. They are **not** the source of truth — the released kernel is
   a real released `@oas-framework/oas@0.20.0` CLI in an isolated sandbox and
   runs in CI on every pull request (`npm run probe`).
 
-## Known kernel defect observed by the probe (not package-side)
+## Known kernel defects observed by the probe (not package-side)
 
 Released 0.20.0 `oas doctor` prints
 
@@ -40,6 +40,23 @@ every v2-materialized capability trips it. It is cosmetic and affects any v2
 package, not just this one. The package maintainer has confirmed it as a kernel
 defect and ruled that no package-side workaround may be added; the probe
 records the warning verbatim as evidence and does not treat it as a failure.
+
+## Second divergence: `oas install` does not report available templates
+
+`docs/packages.md` in the released kernel states that `oas install <package>`
+"materializes capabilities and reports available templates as optional
+follow-ups". It does not: no install path emits them, and the
+`Config template "…"` line exists only in the `oas init --package` adoption
+path (`bin/oas.mjs`). Verified on both a fresh install and a re-install against
+0.20.0.
+
+Consequence for adopters: after `oas install oas.linear` nothing tells you a
+config template exists. Run `oas init --package oas.linear` (or
+`oas config adopt`) to adopt it, or write your own config — see the README.
+
+The consumer probe asserts what install actually guarantees (locks the
+capability, activates nothing, names the trust gate) and records this
+divergence as evidence rather than asserting documented-but-absent behavior.
 
 ## Version and compatibility
 

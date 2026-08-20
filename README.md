@@ -74,6 +74,10 @@ explicitly:
 oas init --package oas.linear --dir /path/to/scope   # adopts the "default" template
 ```
 
+Note that released OAS 0.20.0 does not mention available templates after
+`oas install`, despite documenting that it does — so nothing prompts you. See
+[`SCHEMA-STATUS.md`](SCHEMA-STATUS.md).
+
 Adoption records the exact template as a commit-safe base under
 `.agents/config-templates/adopted/oas.linear/default/`, so `oas config diff` and
 `oas config sync` can compare against it later. What lands in your
@@ -286,9 +290,16 @@ npm run probe  # isolated consumer probe against a released kernel
 ```
 
 `npm test` validates both manifests against the vendored 0.20 schemas, enforces
-the dedicated-capability-root and config-template contracts (including template
-portability), and exercises the GraphQL wrapper and advisory hook against local
-mock servers.
+the dedicated-capability-root and config-template contracts, and exercises the
+GraphQL wrapper and advisory hook against local mock servers. Manifest
+validation deliberately mirrors released-0.20 self-containment exactly,
+including its asymmetry: an `agents[]` entry must be a soul **directory**, while
+a `skills[]` entry may be a file, and declared directory trees are walked so a
+descendant symlink cannot escape the capability root. Config-template
+portability uses the shared predicate in
+[`scripts/lib/config-portability.mjs`](scripts/lib/config-portability.mjs),
+which the consumer probe imports too, so the authoring gate and the consumer
+gate cannot drift apart.
 
 `npm run probe` is the acceptance gate. It npm-installs a real released
 `@oas-framework/oas` (0.20.0 by default; override with `OAS_PROBE_VERSION`, or
