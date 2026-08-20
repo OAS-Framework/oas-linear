@@ -296,8 +296,12 @@ execute those instances' stale suites, making a green run depend on which agent
 worktrees happen to exist on the machine.
 [`scripts/check-test-scripts.mjs`](scripts/check-test-scripts.mjs) enforces that
 before the runner starts — no script may use bare discovery, `npm test` must
-name exactly the suites under `test/`, and it may not pass a test-filtering
-flag. The gate runs *outside* the test run on purpose: a filter such as
+name exactly the suites under `test/`, it may not pass a test-selection option
+(`--test-name-pattern`, `--test-skip-pattern`, `--test-shard`, `--test-only`),
+and the option grammar is **fail-closed**: an option the gate does not recognize
+is an error rather than an assumption, because an unknown value-taking option
+(`--redirect-warnings <path>`) would swallow suite paths and leave the real
+invocation discovering everything. The gate runs *outside* the test run on purpose: a filter such as
 `--test-name-pattern` can exclude the very assertion that would report it, so an
 in-suite check cannot catch its own filtering. `test/npm-scripts.test.mjs`
 unit-tests the same helpers.

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   ROOT, bareDiscoveryIn, checkScripts, filteringFlagsIn,
-  inventorySuites, parseNodeInvocation, suitesNamedBy,
+  inventorySuites, parseNodeInvocation, suitesNamedBy, unrecognizedOptionsIn,
 } from "../scripts/check-test-scripts.mjs";
 
 const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
@@ -36,17 +36,23 @@ test("bare discovery is reported", () => {
   assert.deepEqual(bareDiscoveryIn("node scripts/consumer-probe.mjs"), []);
 });
 
-test("a flag's VALUE is never a suite target", () => {
-  // `tap` is a value, not a target — this still discovers everything.
+test("a suite-shaped flag value cannot satisfy the list", () => {
+  // Historically this was handled by tracking which options consume a value, so
+  // `--test-name-pattern test/a.test.mjs` would not count the path as a target.
+  // The gate is now fail-closed instead: the option is rejected outright, which
+  // is strictly stronger — it does not depend on knowing that this particular
+  // option takes a value.
+  const suites = inventory();
+  const asFlagValue = `node --test --test-name-pattern ${suites.join(" ")}`;
+  const problems = checkScripts({ scripts: { test: asFlagValue } }, suites);
+  assert.ok(problems.length, "a suite-shaped flag value must never yield a clean gate");
+  assert.ok(problems.some((p) => p.includes("--test-name-pattern")), problems.join(" | "));
+
+  // A bare invocation with no positionals at all is still reported as bare.
   assert.deepEqual(bareDiscoveryIn("node --test --test-reporter tap"), ["node --test --test-reporter tap"]);
   assert.deepEqual(bareDiscoveryIn("node --test --test-reporter=tap"), ["node --test --test-reporter=tap"]);
-  // And the hard case: a flag value that IS a suite path.
-  const suites = inventory();
-  assert.deepEqual(suitesNamedBy(`node --test --test-name-pattern ${suites.join(" ")}`), suites.slice(1));
-  assert.notDeepEqual(suitesNamedBy(`node --test --test-name-pattern ${suites.join(" ")}`), suites);
-  // The equals form carries its own value; `--` ends option parsing.
-  assert.deepEqual(suitesNamedBy(`node --test --test-name-pattern=x ${suites.join(" ")}`), suites);
-  assert.deepEqual(suitesNamedBy(`node --test --test-reporter tap -- ${suites.join(" ")}`), suites);
+  // `--` ends option parsing, so the paths after it are unambiguously targets.
+  assert.deepEqual(suitesNamedBy(`node --test -- ${suites.join(" ")}`), suites);
 });
 
 test("`--test-reporter` alone is not a `node --test` invocation", () => {
@@ -62,11 +68,32 @@ test("quoted targets are accepted, in both quote styles", () => {
   assert.deepEqual(suitesNamedBy("node --test './test/a.test.mjs'"), ["test/a.test.mjs"]);
 });
 
-test("test-filtering flags are reported", () => {
+test("test-filtering options are reported, including --test-only", () => {
   assert.deepEqual(filteringFlagsIn("node --test --test-name-pattern x test/a.test.mjs"), ["--test-name-pattern"]);
   assert.deepEqual(filteringFlagsIn("node --test --test-skip-pattern=y test/a.test.mjs"), ["--test-skip-pattern"]);
+  assert.deepEqual(filteringFlagsIn("node --test --test-shard=1/2 test/a.test.mjs"), ["--test-shard"]);
+  // `--test-only` is the easy one to miss: node exits 0 having run no ordinary
+  // tests at all, so every suite "passes" without executing.
+  assert.deepEqual(filteringFlagsIn("node --test --test-only test/a.test.mjs"), ["--test-only"]);
   assert.deepEqual(filteringFlagsIn("node --test test/a.test.mjs"), []);
   assert.deepEqual(filteringFlagsIn("npm run validate"), []);
+});
+
+test("the gate is FAIL-CLOSED on options it does not recognize", () => {
+  // Enumerating Node's value-taking options is unwinnable: one omission turns
+  // suite paths into option values while the invocation still discovers
+  // everything. `--redirect-warnings <suite-path>` was the proof.
+  const suites = inventory();
+  const swallowed = `node --test ${suites.map((p) => `--redirect-warnings ${p}`).join(" ")}`;
+  assert.deepEqual(unrecognizedOptionsIn(swallowed), suites.map(() => "--redirect-warnings"));
+  const problems = checkScripts({ scripts: { test: swallowed } }, suites);
+  assert.ok(problems.some((p) => p.includes("--redirect-warnings") && p.includes("does not recognize")),
+    problems.join(" | "));
+  // A filtering option gets the specific message rather than the generic one.
+  const only = checkScripts({ scripts: { test: `node --test --test-only ${suites.join(" ")}` } }, suites);
+  assert.ok(only.some((p) => p.includes("--test-only") && p.includes("the tests that ran passed")), only.join(" | "));
+  // And the repository's own invocation uses nothing that needs allowlisting.
+  assert.deepEqual(unrecognizedOptionsIn(pkg.scripts.test), []);
 });
 
 test("a suite dropped from `test` fails even if another script names it", () => {
