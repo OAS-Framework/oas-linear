@@ -4,8 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
-  ROOT, checkScripts, inventorySuites, looksLikeNodeTest,
-  selectionOptionsIn, strictTargets,
+  ROOT, canonicalScripts, checkScripts, inventorySuites,
 } from "../scripts/check-test-scripts.mjs";
 
 const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
@@ -19,91 +18,111 @@ const inventory = () => inventorySuites(join(ROOT, "test"));
  * the very assertion that would report it. These tests verify the gate's logic;
  * the gate is what actually blocks a bad script.
  *
- * Every REJECT fixture below is a spelling that once slipped through, and every
- * ACCEPT fixture a form that must not be over-rejected. They are kept so a
- * future rewrite has to keep handling all of them.
+ * COVERAGE, stated precisely rather than generously:
+ *  - REJECTED_TEST_COMMANDS below is the accumulated table of `test`-command
+ *    spellings that bypassed earlier designs. Each row must produce a problem.
+ *  - Inventory-level cases (a suite dropped, a same-basename decoy, an unlisted
+ *    nested suite) and script-set cases (an extra or missing script) have their
+ *    own dedicated tests further down, because they vary the INVENTORY or the
+ *    script map rather than the command string.
  */
 
-const REJECTED = [
+/**
+ * Every `test`-command spelling that defeated a previous design. `SUITES` is
+ * replaced with the real inventory so no fixture can pass merely by naming
+ * paths that do not exist.
+ */
+const REJECTED_TEST_COMMANDS = [
   ["bare discovery", "node --test"],
   ["a reporter flag and no suites", "node --test --test-reporter tap"],
-  ["a suite-shaped selection value", "node --test --test-name-pattern SUITES"],
-  ["a value-taking option swallowing suites", "node --test --redirect-warnings SUITES"],
-  ["a BACKSLASH-ESCAPED option the shell would unescape", "node --test \\--redirect-warnings SUITES"],
-  ["a quoted option the shell would unquote", 'node --test "--redirect-warnings" SUITES'],
+  ["a selection option whose VALUE is a suite path", "node --test --test-name-pattern SUITES"],
+  ["an unenumerable value-taking option swallowing suites", "node --test --redirect-warnings SUITES"],
+  ["a BACKSLASH-ESCAPED option the shell unescapes", "node --test \\--redirect-warnings SUITES"],
+  ["a quoted option the shell unquotes", 'node --test "--redirect-warnings" SUITES'],
   ["--test-only, which runs no ordinary tests", "node --test --test-only SUITES"],
   ["--test-skip-pattern", "node --test --test-skip-pattern=x SUITES"],
   ["--test-shard", "node --test --test-shard=1/2 SUITES"],
   ["a glob instead of explicit paths", "node --test test/*.test.mjs"],
-  ["command substitution", "node --test $(ls test/*.test.mjs)"],
-  ["a variable expansion", "node --test $SUITES"],
-  ["quoted suite paths", 'node --test "test/a.test.mjs"'],
+  ["command substitution in the arguments", "node --test $(ls test/*.test.mjs)"],
+  ["a variable expansion in the arguments", "node --test $SUITES"],
+  ["quoted suite paths (rejected by design; see the gate's header)", 'node --test "test/a.test.mjs"'],
+  // The bypasses that beat DETECTION: a second invocation hidden from any
+  // scanner, sitting beside a perfectly valid one. The shell reassembles
+  // `--test` and that first process discovers everything.
+  ["parameter expansion hiding an invocation", "node --te${UNSET}st && node --test SUITES"],
+  ["command substitution hiding an invocation", "node --te$(printf st) && node --test SUITES"],
+  ["a line continuation hiding an invocation", "node --te\\\nst && node --test SUITES"],
+  ["an extra bare invocation after a valid one", "node --test SUITES && node --test"],
+  ["an extra bare invocation before a valid one", "node --test && node --test SUITES"],
 ];
 
-test("the repository's own scripts pass the gate", () => {
+test("the repository's own scripts are exactly canonical", () => {
   assert.deepEqual(checkScripts(pkg, inventory()), []);
-  assert.ok(strictTargets(`node --test ${inventory().join(" ")}`), "the real invocation must match the strict grammar");
+  assert.deepEqual(pkg.scripts, canonicalScripts(inventory()));
 });
 
 test("every known bypass spelling is rejected", () => {
   const suites = inventory();
-  for (const [label, template] of REJECTED) {
-    const command = template.replace("SUITES", suites.join(" "));
-    const problems = checkScripts({ scripts: { test: command } }, suites);
-    assert.ok(problems.length, `MUST be rejected but was accepted — ${label}: ${command}`);
+  for (const [label, template] of REJECTED_TEST_COMMANDS) {
+    const command = template.replaceAll("SUITES", suites.join(" "));
+    const problems = checkScripts({ scripts: { ...canonicalScripts(suites), test: command } }, suites);
+    assert.ok(problems.length, `MUST be rejected but was accepted — ${label}: ${JSON.stringify(command)}`);
   }
 });
 
-test("the escaped-option bypass specifically", () => {
-  // The shell removes the backslash and node receives `--redirect-warnings`,
-  // consuming each following suite path and discovering everything, while a
-  // tokenizer of the script TEXT sees an inert word. Detection de-escapes;
-  // acceptance is the strict grammar, so neither spelling can pass.
+test("a hidden second invocation cannot ride along with a valid one", () => {
+  // This is the case that defeated every detector: the gate never sees an
+  // invocation to check, so anything undetected was implicitly allowed.
+  // Comparing the whole command removes the question.
   const suites = inventory();
-  const escaped = `node --test ${suites.map((p) => `\\--redirect-warnings ${p}`).join(" ")}`;
-  assert.ok(looksLikeNodeTest(escaped), "an escaped option must not hide that this runs node --test");
-  assert.equal(strictTargets(escaped), undefined, "it must not satisfy the strict grammar");
-  assert.ok(checkScripts({ scripts: { test: escaped } }, suites).length);
+  const canonical = canonicalScripts(suites);
+  const smuggled = `node --te\${UNSET}st && ${canonical.test}`;
+  const problems = checkScripts({ scripts: { ...canonical, test: smuggled } }, suites);
+  assert.ok(problems.some((p) => p.includes("not the canonical command")), problems.join(" | "));
 });
 
-test("selection options are named specifically, not just rejected", () => {
-  const suites = inventory();
-  for (const option of ["--test-name-pattern x", "--test-skip-pattern=x", "--test-shard=1/2", "--test-only"]) {
-    const command = `node --test ${option} ${suites.join(" ")}`;
-    assert.ok(selectionOptionsIn(command).length, `${option} must be recognized as a selection option`);
-    const problems = checkScripts({ scripts: { test: command } }, suites);
-    assert.ok(problems.some((p) => p.includes("the tests that ran passed")),
-      `${option} should get the selection-specific message; got: ${problems.join(" | ")}`);
-  }
-});
-
-test("only the `test` script may run the runner", () => {
+test("an extra script is reported rather than ignored", () => {
   const suites = inventory();
   const problems = checkScripts({
-    scripts: { test: `node --test ${suites.join(" ")}`, smoke: `node --test ${suites[0]}` },
+    scripts: { ...canonicalScripts(suites), smoke: `node --test ${suites[0]}` },
   }, suites);
-  assert.ok(problems.some((p) => p.includes('"smoke"') && p.includes("only \"test\" may")), problems.join(" | "));
+  assert.ok(problems.some((p) => p.includes('unexpected script "smoke"')), problems.join(" | "));
 });
 
-test("a suite dropped from `test` is reported as never running", () => {
+test("a missing script is reported", () => {
+  const suites = inventory();
+  const { probe, ...withoutProbe } = canonicalScripts(suites);
+  const problems = checkScripts({ scripts: withoutProbe }, suites);
+  assert.ok(problems.some((p) => p.includes('missing script "probe"')), problems.join(" | "));
+});
+
+test("a suite dropped from `test` is reported", () => {
   // Built from the inventory, never by editing the real script's text: a string
   // replace silently becomes a no-op when the path is spelled differently, and
   // a fixture that stops mutating proves nothing.
   const suites = inventory();
   assert.ok(suites.length > 1, "this fixture needs at least two suites");
-  const [dropped, ...remaining] = suites;
-  const problems = checkScripts({ scripts: { test: `node --test ${remaining.join(" ")}` } }, suites);
-  assert.ok(problems.some((p) => p.includes(dropped) && p.includes("never run")), problems.join(" | "));
+  const dropped = canonicalScripts(suites).test.replace(` ${suites[0]}`, "");
+  const problems = checkScripts({ scripts: { ...canonicalScripts(suites), test: dropped } }, suites);
+  assert.ok(problems.some((p) => p.includes("not the canonical command")), problems.join(" | "));
+  assert.notEqual(dropped, canonicalScripts(suites).test, "the fixture must actually mutate the command");
 });
 
-test("a same-basename path outside test/ does not satisfy the list", () => {
+test("a same-basename path outside test/ is reported", () => {
   const suites = inventory();
-  const decoy = suites[0].replace(/^test\//, "other/");
-  const problems = checkScripts({
-    scripts: { test: `node --test ${decoy} ${suites.slice(1).join(" ")}` },
-  }, suites);
-  assert.ok(problems.some((p) => p.includes("not under test/")), problems.join(" | "));
-  assert.ok(problems.some((p) => p.includes("never run")), problems.join(" | "));
+  const decoy = canonicalScripts(suites).test.replace(suites[0], suites[0].replace(/^test\//, "other/"));
+  const problems = checkScripts({ scripts: { ...canonicalScripts(suites), test: decoy } }, suites);
+  assert.ok(problems.some((p) => p.includes("not the canonical command")), problems.join(" | "));
+});
+
+test("an unlisted suite changes the canonical command, so it cannot be added silently", () => {
+  const suites = inventory();
+  const withNew = [...suites, "test/nested/new.test.mjs"].sort();
+  // The canonical command is derived from the inventory, so adding a suite
+  // without updating package.json is a mismatch by construction.
+  assert.notEqual(canonicalScripts(withNew).test, canonicalScripts(suites).test);
+  const problems = checkScripts({ scripts: canonicalScripts(suites) }, withNew);
+  assert.ok(problems.some((p) => p.includes("test/nested/new.test.mjs")), problems.join(" | "));
 });
 
 test("the suite inventory really is recursive", (t) => {
@@ -118,15 +137,9 @@ test("the suite inventory really is recursive", (t) => {
   writeFileSync(join(tempRoot, "test", "nested", "deeper", "deep.test.mjs"), "// fixture\n");
   writeFileSync(join(tempRoot, "test", "nested", "not-a-suite.txt"), "ignored\n");
 
-  const found = inventorySuites(join(tempRoot, "test"), tempRoot);
-  assert.deepEqual(found, [
+  assert.deepEqual(inventorySuites(join(tempRoot, "test"), tempRoot), [
     "test/nested/deeper/deep.test.mjs",
     "test/nested/new.test.mjs",
     "test/top.test.mjs",
   ], "inventory must walk every level and ignore non-suite files");
-
-  // Nested paths are accepted by the grammar, and an unlisted one is reported.
-  assert.ok(strictTargets(`node --test ${found.join(" ")}`), "nested suite paths must be a valid invocation");
-  const problems = checkScripts({ scripts: { test: "node --test test/top.test.mjs" } }, found);
-  assert.ok(problems.some((p) => p.includes("test/nested/new.test.mjs")), problems.join(" | "));
 });

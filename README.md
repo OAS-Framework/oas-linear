@@ -295,30 +295,24 @@ discovery: this repository contains nested agent worktrees under
 execute those instances' stale suites, making a green run depend on which agent
 worktrees happen to exist on the machine.
 [`scripts/check-test-scripts.mjs`](scripts/check-test-scripts.mjs) enforces that
-before the runner starts. It does not interpret the command — it **constrains**
-it. Only the `test` script may run the runner, and its invocation must be
-exactly
+before the runner starts. It parses nothing and detects nothing: it builds the
+`package.json` scripts block that this repository must have — with `test`
+naming every suite under `test/` in sorted order, and no options at all — and
+compares character for character.
 
-```text
-node --test <plain-suite-path> [<plain-suite-path> ...]
-```
-
-naming exactly the suites under `test/`, with no options, quoting, escaping, or
-shell expansion. Anything else is rejected on sight.
-
-The grammar is that narrow because interpreting the command kept losing to
-spellings it did not model: a selection option whose *value* is a suite path
+That bluntness is the result of four sharper designs failing, each to a spelling
+it did not model: a selection option whose *value* is a suite path
 (`--test-name-pattern test/a.test.mjs`); an unenumerable value-taking option
-swallowing paths (`--redirect-warnings test/a.test.mjs`); and a backslash-escaped
-option (`\--redirect-warnings`), where the shell removes the escape and Node
-receives the real option while a tokenizer of the script text sees an inert
-word. Quoted paths are rejected too — not because they are dangerous in
-themselves, but because accepting quoting means modelling it, and that is the
-door the escape bypass came through. Widening the grammar is a deliberate edit
-with those failure modes in view. The gate runs *outside* the test run on purpose: a filter such as
-`--test-name-pattern` can exclude the very assertion that would report it, so an
-in-suite check cannot catch its own filtering. `test/npm-scripts.test.mjs`
-unit-tests the same helpers.
+swallowing paths (`--redirect-warnings test/a.test.mjs`); a backslash-escaped
+option (`\--redirect-warnings`) that the shell unescapes after the check has
+read the text; and — fatally for any detector — a second invocation the shell
+reassembles from an expansion (`node --te${UNSET}st && node --test …`), which
+performs bare discovery while never looking like an invocation at all. Anything
+a gate merely fails to *recognize* is implicitly allowed, so this one recognizes
+nothing and compares everything. Changing what a script does means editing
+`canonicalScripts()` deliberately.
+[`test/npm-scripts.test.mjs`](test/npm-scripts.test.mjs) unit-tests the gate and
+keeps every historical bypass as a fixture.
 
 It validates both manifests against the vendored 0.20 schemas, enforces
 the dedicated-capability-root and config-template contracts, and exercises the
