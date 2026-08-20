@@ -332,22 +332,33 @@ Three properties are not statements about the text and are enforced separately:
   forge the variable too. The check reports divergence; it does not prove
   provenance, and the code says so rather than implying otherwise.
 
+- The gate builds its children's environment rather than inheriting one.
+  Performing a step is not enough if the caller controls what the step *does*:
+  `NODE_OPTIONS` carries `--require`, so a preload that exits when `argv[1]` is
+  the validator made the gate announce validation, run the suites and exit 0
+  having validated nothing. `NODE_OPTIONS`, `NODE_REPL_EXTERNAL_MODULE` and
+  `NODE_TEST_CONTEXT` are stripped for every child.
+
 What the gate guarantees is correspondingly narrow, and stated plainly: **when
-it runs, manifest validation and exactly the inventoried suites run with it.**
-It is not a trust anchor against a hostile commit. A `pretest`, an edit to the
-gate itself, or a hostile `test` executes before or as the gate, and moving the
-check into another file in this repository would relocate that boundary without
-closing it. `pretest`/`posttest` are rejected as unexpected scripts; review,
-protected CI and branch policy are the controls beyond that point.
+it runs in a process whose own runtime has not been tampered with, manifest
+validation and exactly the inventoried suites run with it** — its children are
+covered unconditionally, because it constructs their environment. It is not a
+trust anchor against a hostile commit. A `pretest`, an edit to the gate itself,
+runtime injection into the gate's *own* process, or a hostile `test` executes
+before or as the gate, and moving the check into another file in this repository
+would relocate that boundary without closing it. `pretest`/`posttest` are
+rejected as unexpected scripts; review, protected CI and branch policy are the
+controls beyond that point.
 
 [`test/npm-scripts.test.mjs`](test/npm-scripts.test.mjs) unit-tests the gate,
 keeps every historical bypass as a fixture, and runs the real script
 end-to-end in a throwaway repository containing a decoy suite in a nested agent
 worktree — asserting both that the decoy does not run and that bare discovery
-*would* have run it. One end-to-end case drives **real npm** with a `test` that
-rewrites `package.json` and forges `npm_lifecycle_script`: it asserts the
-forgery still passes the gate, and that validation runs anyway. A limitation
-with a test on it cannot quietly be re-described as closed.
+*would* have run it. Two end-to-end cases drive **real npm** with a `test` that
+rewrites `package.json` and forges `npm_lifecycle_script` — one asserting the
+forgery still passes the gate and that validation runs anyway, one adding a
+`NODE_OPTIONS` preload that tries to no-op the validator. A limitation with a
+test on it cannot quietly be re-described as closed.
 
 It validates both manifests against the vendored 0.20 schemas, enforces
 the dedicated-capability-root and config-template contracts, and exercises the

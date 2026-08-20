@@ -75,9 +75,19 @@
  * edit the checker, and moving the check to another file in the same repository
  * relocates that boundary without closing it. The canonical-scripts comparison
  * rejects `pretest`/`posttest` in the tree; review, protected CI and branch
- * policy are the controls beyond it. What this gate DOES guarantee is narrower
- * and load-bearing: when it runs, validation and exactly the inventoried suites
- * run with it.
+ * policy are the controls beyond it.
+ *
+ * That boundary includes RUNTIME INJECTION into this process. `NODE_OPTIONS`
+ * carries `--require`/`--import`, so whoever launches the gate can load code
+ * into it and rewrite what it does — which is editing the checker by another
+ * means, not a separate weakness. It is listed here so nobody reads the
+ * guarantee below as wider than it is.
+ *
+ * What this gate DOES guarantee is narrower and load-bearing: when it runs in a
+ * process whose own runtime has not been tampered with, validation and exactly
+ * the inventoried suites run with it. Its CHILDREN are covered unconditionally,
+ * because it builds their environment rather than inheriting one (see
+ * `childEnv`).
  */
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
@@ -189,6 +199,32 @@ export function checkScripts(pkg, inventory, env = {}) {
   return problems;
 }
 
+/**
+ * Environment for the processes this gate spawns. Inheriting the caller's
+ * environment wholesale hands a hostile `test` command control of what the
+ * children DO, which defeats the point of the gate running them:
+ *
+ *  - NODE_OPTIONS carries `--require`/`--import`/`--experimental-loader`, so a
+ *    preload can no-op the validator by inspecting `process.argv[1]` — the gate
+ *    then announces validation, runs the suites and exits 0 having validated
+ *    nothing. Reproduced through real npm; regression-tested.
+ *  - NODE_REPL_EXTERNAL_MODULE is a second load-arbitrary-code vector.
+ *  - NODE_TEST_CONTEXT makes a spawned `node --test` emit no report and exit 0
+ *    even when suites FAIL (it is set in every test-file process and inherited
+ *    by that process's children).
+ *
+ * Deleted rather than allow-listed: an allow-list of everything a child may
+ * need is unenumerable, and getting it wrong breaks legitimate runs. This is a
+ * short, closed list of ways to change what a child EXECUTES.
+ */
+export function childEnv(source) {
+  const env = { ...source };
+  for (const name of ["NODE_OPTIONS", "NODE_REPL_EXTERNAL_MODULE", "NODE_TEST_CONTEXT"]) {
+    delete env[name];
+  }
+  return env;
+}
+
 // Run as gate + runner only when invoked directly.
 if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
   const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
@@ -209,8 +245,7 @@ if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import
   // runner: it emits no readable report and exits 0 even when suites FAIL. So a
   // gate invoked from inside a test process would print green over red — the
   // precise failure this file exists to prevent.
-  const env = { ...process.env };
-  delete env.NODE_TEST_CONTEXT;
+  const env = childEnv(process.env);
 
   const spawn = (label, args) => {
     const run = spawnSync(process.execPath, args, { cwd: ROOT, stdio: "inherit", shell: false, env });

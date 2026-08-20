@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
-  ROOT, canonicalScripts, checkScripts, inventoryProblems, inventorySuites,
+  ROOT, canonicalScripts, checkScripts, childEnv, inventoryProblems, inventorySuites,
 } from "../scripts/check-test-scripts.mjs";
 
 const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
@@ -152,11 +152,12 @@ test("a missing script is reported", () => {
   assert.ok(problems.some((p) => p.includes('missing script "probe"')), problems.join(" | "));
 });
 
-test("a package.json rewritten after npm loaded the command is reported", () => {
-  // npm resolves the lifecycle command BEFORE running it. A noncanonical
-  // `test` can therefore rewrite package.json to canonical and only then call
-  // the gate, which would read the rewritten file. npm_lifecycle_script carries
-  // the bytes npm actually loaded, which no later rewrite can change.
+test("an UNSPOOFED mismatch between the loaded command and package.json is reported", () => {
+  // npm resolves the lifecycle command BEFORE running it, so the file the gate
+  // reads and the command npm is running can disagree. This is a consistency
+  // check and nothing more: the loaded command controls the environment of
+  // everything it spawns, so it can override the value its child sees. The
+  // forgery is exercised, and asserted to succeed, further down.
   const suites = inventory();
   const canonical = canonicalScripts(suites);
   const problems = checkScripts({ scripts: canonical }, suites, {
@@ -262,15 +263,16 @@ test("end-to-end: bare discovery WOULD have run the nested agent worktree", (t) 
   const repo = fixtureRepo(t);
   // NODE_TEST_CONTEXT must be stripped by hand here: this spawn deliberately
   // bypasses the gate, which is what does the stripping for real runs.
-  const env = { ...process.env };
-  delete env.NODE_TEST_CONTEXT;
-  const run = spawnSync(process.execPath, ["--test"], { cwd: repo.root, encoding: "utf8", env });
+  const run = spawnSync(process.execPath, ["--test"], {
+    cwd: repo.root, encoding: "utf8", env: childEnv(process.env),
+  });
   assert.ok(repo.ran().includes("decoy"), `bare discovery must reach the decoy: ${run.stdout}`);
 });
 
-test("end-to-end: a self-rewriting test command cannot hide from the gate", (t) => {
-  // The blocker this closes: package.json on disk is canonical by the time the
-  // gate reads it, because the command npm actually loaded rewrote it first.
+test("end-to-end: an unforged mismatch is reported before anything runs", (t) => {
+  // Same consistency check, end to end. It catches divergence that nobody is
+  // hiding; it does NOT survive a command that forges the variable, which the
+  // real-npm test below demonstrates rather than papers over.
   const repo = fixtureRepo(t);
   const run = repo.runGate({
     npm_lifecycle_event: "test",
@@ -351,12 +353,59 @@ test("end-to-end: a spoofed lifecycle variable cannot skip validation", (t) => {
     },
   }, null, 2));
 
-  const env = { ...process.env };
-  delete env.NODE_TEST_CONTEXT;
-  const run = spawnSync("npm", ["test"], { cwd: repo.root, encoding: "utf8", env });
+  const run = spawnSync("npm", ["test"], {
+    cwd: repo.root, encoding: "utf8", env: childEnv(process.env),
+  });
 
   assert.equal(run.status, 0, `the forgery is expected to pass the gate: ${run.stdout}${run.stderr}`);
   assert.ok(repo.ran().includes("validate"),
     "validation must run even when the lifecycle variable is forged — it is performed, not named");
   assert.ok(repo.ran().includes("alpha") && repo.ran().includes("beta"), "and the suites still run");
+});
+
+test("end-to-end: an inherited NODE_OPTIONS preload cannot skip validation", (t) => {
+  // Performing a step is not enough if the caller controls what the step DOES.
+  // NODE_OPTIONS carries --require, so a preload that exits when argv[1] is the
+  // validator made the gate announce validation, run the suites and exit 0
+  // having validated nothing. The gate builds its children's environment now.
+  const repo = fixtureRepo(t);
+  const canonical = canonicalScripts(["test/alpha.test.mjs", "test/nested/beta.test.mjs"]);
+  writeFileSync(join(repo.root, "skip.cjs"),
+    'if (process.argv[1] && process.argv[1].endsWith("validate-manifests.mjs")) process.exit(0);\n');
+  // The full exploit: rewrite package.json to canonical, forge the lifecycle
+  // variable, AND preload the skip — so every check the gate can make on its
+  // own inputs passes, and only the child environment stands between the
+  // announcement "running validation" and validating nothing.
+  writeFileSync(join(repo.root, "rewrite.mjs"), [
+    'import { readFileSync, writeFileSync } from "node:fs";',
+    'const p = new URL("./package.json", import.meta.url);',
+    'const pkg = JSON.parse(readFileSync(p, "utf8"));',
+    `pkg.scripts.test = ${JSON.stringify(canonical.test)};`,
+    "writeFileSync(p, JSON.stringify(pkg, null, 2));",
+    "",
+  ].join("\n"));
+  writeFileSync(join(repo.root, "package.json"), JSON.stringify({
+    name: "fixture", private: true, type: "module",
+    scripts: {
+      ...canonical,
+      test: `node rewrite.mjs && npm_lifecycle_script=${JSON.stringify(canonical.test)} `
+        + `NODE_OPTIONS=--require=./skip.cjs ${canonical.test}`,
+    },
+  }, null, 2));
+
+  const env = childEnv(process.env);
+  const run = spawnSync("npm", ["test"], { cwd: repo.root, encoding: "utf8", env });
+  assert.ok(repo.ran().includes("validate"),
+    `validation must run despite the preload: ${run.stdout}${run.stderr}`);
+});
+
+test("childEnv removes every way to change what a child executes", () => {
+  const env = childEnv({
+    NODE_OPTIONS: "--require=./skip.cjs",
+    NODE_REPL_EXTERNAL_MODULE: "./skip.cjs",
+    NODE_TEST_CONTEXT: "child-v8",
+    PATH: "/usr/bin", HOME: "/home/x", NODE_ENV: "test",
+  });
+  assert.deepEqual(env, { PATH: "/usr/bin", HOME: "/home/x", NODE_ENV: "test" },
+    "injection vectors stripped, ordinary environment preserved");
 });
