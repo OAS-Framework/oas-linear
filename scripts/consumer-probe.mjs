@@ -684,9 +684,28 @@ writeFileSync(join(gitOrigin, "README.md"), "# not the package\n");
 originGit("add", "-A");
 originGit("commit", "-q", "-m", "probe fixture");
 originGit("tag", "probe-v2");
-const originCommit = run("git", ["-C", gitOrigin, "rev-parse", "HEAD"]).stdout.trim();
+const pinnedCommit = run("git", ["-C", gitOrigin, "rev-parse", "probe-v2^{commit}"]).stdout.trim();
+
+// ADVANCE the branch past the tag, with a root-only change that leaves the
+// payload untouched. Without this the tag and the branch HEAD are the same
+// commit, so `@probe-v2` acquires what a source with no ref would acquire and
+// every "pinned" assertion below would hold for the wrong reason.
+writeFileSync(join(gitOrigin, "NOTICE.md"), "advanced after the tag; not payload\n");
+originGit("add", "-A");
+originGit("commit", "-q", "-m", "advance the branch past probe-v2");
+const advancedHead = run("git", ["-C", gitOrigin, "rev-parse", "HEAD"]).stdout.trim();
+
 const gitScope = join(sandbox, "git-scope");
 mkdirSync(gitScope, { recursive: true });
+
+check("the fixture branch is ADVANCED past the tag, so pinning is testable at all", () => {
+  // A precondition, reported through the harness rather than thrown: if the tag
+  // and the branch head were the same commit, every pinned assertion below
+  // would pass whether or not the ref was honored.
+  assert(advancedHead !== pinnedCommit,
+    `tag and branch head are the same commit (${pinnedCommit.slice(0, 8)}); ref pinning is untestable`);
+  return `tag ${pinnedCommit.slice(0, 8)} != branch head ${advancedHead.slice(0, 8)}`;
+});
 
 check("the README's documented Git source spelling is ACCEPTED", () => {
   const source = `file://${gitOrigin}@probe-v2`;
@@ -706,16 +725,34 @@ check("a `git:`-PREFIXED URL is rejected, so the README must not document one", 
   return `rejected as ${rejected.error.code}`;
 });
 
-check("the Git install locks the exact commit, ref, and selected package root", () => {
+check("the Git install locks the TAGGED commit, not the advanced branch head", () => {
   const lock = JSON.parse(readFileSync(join(gitScope, "oas-lock.json"), "utf8"));
   const pkg = lock.packages["oas.linear"];
   assert(pkg, "packages['oas.linear'] missing from the Git-sourced lock");
-  equal(pkg.commit, originCommit, "locked commit must be the exact tagged commit");
+  equal(pkg.commit, pinnedCommit, "locked commit must be the exact tagged commit");
+  assert(pkg.commit !== advancedHead,
+    `the ref was NOT honored: locked the advanced branch head ${advancedHead.slice(0, 8)}`);
   equal(pkg.path, "oas-package", "the package root inside the repository must be selected, not the repo root");
   assert(pkg.source.startsWith("git:"), `locked source must normalize to a git: source, got ${pkg.source}`);
   assert(pkg.source.includes("probe-v2"), `locked source must pin the ref, got ${pkg.source}`);
   equal(lock.capabilities["oas.linear"].path, "capabilities/oas-linear", "capability root from a Git source");
-  return `commit ${originCommit.slice(0, 8)}, ref probe-v2, root oas-package`;
+  return `commit ${pinnedCommit.slice(0, 8)} (branch is at ${advancedHead.slice(0, 8)}), root oas-package`;
+});
+
+check("dropping the ref locks the ADVANCED head, proving the pin did the work", () => {
+  // Mutation proof for the check above. Same repository, same command, ref
+  // removed: if this still locked the tagged commit, `@probe-v2` would be
+  // decorative and the pinned assertion would prove nothing.
+  const unpinnedScope = join(sandbox, "git-scope-unpinned");
+  mkdirSync(unpinnedScope, { recursive: true });
+  const result = oasJson("install", `file://${gitOrigin}`, "--dir", unpinnedScope, "--json");
+  assert(result.ok, `unpinned Git install failed: ${JSON.stringify(result.error || result)}`);
+  const lock = JSON.parse(readFileSync(join(unpinnedScope, "oas-lock.json"), "utf8"));
+  equal(lock.packages["oas.linear"].commit, advancedHead,
+    "without a ref the kernel must acquire the branch head");
+  assert(lock.packages["oas.linear"].commit !== pinnedCommit,
+    "unpinned and pinned installs must resolve to DIFFERENT commits, or this proves nothing");
+  return `unpinned → ${advancedHead.slice(0, 8)}, pinned → ${pinnedCommit.slice(0, 8)}`;
 });
 
 check("a Git-sourced install materializes the same artifact, and records its provenance", () => {
@@ -734,12 +771,13 @@ check("a Git-sourced install materializes the same artifact, and records its pro
     "the provenance record must actually differ, or this check compares nothing");
 
   const provenance = JSON.parse(readFileSync(join(gitArtifact, PROVENANCE), "utf8"));
-  equal(provenance.commit, originCommit, "provenance commit");
+  equal(provenance.commit, pinnedCommit, "provenance commit");
+  assert(provenance.commit !== advancedHead, "provenance must record the tagged commit, not the branch head");
   equal(provenance.packagePath, "oas-package", "provenance package root");
   equal(provenance.capabilityPath, "capabilities/oas-linear", "provenance capability root");
   assert(provenance.source.startsWith("git:") && provenance.source.includes("probe-v2"),
     `provenance source must be the pinned git source, got ${provenance.source}`);
-  return `${Object.keys(strip(fromGit)).length} files identical; provenance pins ${originCommit.slice(0, 8)}`;
+  return `${Object.keys(strip(fromGit)).length} files identical; provenance pins ${pinnedCommit.slice(0, 8)}`;
 });
 
 // ── Report ──────────────────────────────────────────────────────────────────
