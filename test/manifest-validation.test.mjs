@@ -301,6 +301,60 @@ for (const key of ["account", "workspace", "organization", "token"]) {
   });
 }
 
+// ── Review finding: the scanner matched a narrower YAML shape than the kernel ─
+// Released 0.20's parseYamlNested accepts a QUOTED key
+// (/^(\s*)((?:["']["'][^"']+["']["'])|(?:[^:#][^:]*?)):/ ... it strips the quotes),
+// so a quoted deployment-local key is a live setting and must be caught.
+for (const [label, line] of [
+  ["a double-quoted deployment-local key", '      "account": acme-inc'],
+  ["a single-quoted deployment-local key", "      'workspace': acme-inc"],
+]) {
+  test(`validator rejects a config template with ${label}`, (t) => {
+    const result = runFixture(t, withTemplate(
+      "config-templates/default/oas-config.yaml",
+      PORTABLE_TEMPLATE + line + "\n",
+    ));
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /sets the deployment-local key/);
+  });
+}
+
+test("validator rejects an absolute path inside a flow mapping", (t) => {
+  const result = runFixture(t, withTemplate(
+    "config-templates/default/oas-config.yaml",
+    PORTABLE_TEMPLATE + "      settings: { injection-override: /opt/acme/linear.md }\n",
+  ));
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /sets an absolute path/);
+});
+
+test("validator rejects a deployment-local key inside a flow mapping", (t) => {
+  const result = runFixture(t, withTemplate(
+    "config-templates/default/oas-config.yaml",
+    PORTABLE_TEMPLATE + "      settings: { account: acme-inc }\n",
+  ));
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /sets the deployment-local key `account:`/);
+});
+
+test("validator rejects an absolute path embedded mid-value", (t) => {
+  const result = runFixture(t, withTemplate(
+    "config-templates/default/oas-config.yaml",
+    PORTABLE_TEMPLATE + "      setup: bash /opt/acme/setup.sh\n",
+  ));
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /sets an absolute path \(setup: \/opt\/acme\/setup\.sh\)/);
+});
+
+test("validator rejects an absolute path in a list item", (t) => {
+  const result = runFixture(t, withTemplate(
+    "config-templates/default/oas-config.yaml",
+    PORTABLE_TEMPLATE + "      unconditional-injections:\n        - /opt/acme/x.md\n",
+  ));
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /sets an absolute path/);
+});
+
 test("validator accepts relative paths and commented guidance in a template", (t) => {
   // Guard against over-rejection: a template MAY point at scope-relative paths
   // and MAY carry commented scaffolding naming the values an adopter fills in.

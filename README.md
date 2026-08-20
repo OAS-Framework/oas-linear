@@ -303,13 +303,22 @@ gate cannot drift apart.
 
 `npm run probe` is the acceptance gate. It npm-installs a real released
 `@oas-framework/oas` (0.20.0 by default; override with `OAS_PROBE_VERSION`, or
-point `OAS_PROBE_CLI` at an existing binary), builds a throwaway scope with an
-isolated `HOME` and no OAS/pi environment inherited from the caller, and drives
+point `OAS_PROBE_CLI` at an existing binary), builds a throwaway scope whose
+environment is *constructed rather than inherited* — an allowlisted `PATH` of
+symlinked tools plus controlled stubs, a sandbox `HOME`, a sandbox npm cache,
+and nothing of the caller's OAS/pi context — and drives
 the distributed payload exactly as a consumer would: install → flat
 materialization → `lockfileVersion: 2` → exact restore → explicit template
 adoption and recorded base → per-capability trust → `oas linear` dispatch →
 `oas spawn` briefing, injection, and task-layer composition. Both run in CI on
 every pull request.
+
+Host-executable isolation matters more than it looks: released 0.20 resolves the
+runtime binary *before* it honors `--no-launch`, so even a scaffold-only spawn
+needs `pi` on `PATH`. A probe that inherited the developer's `PATH` would pass
+locally and fail in CI. The probe therefore controls both directions — it
+asserts spawn refuses with no runtime present, then supplies a stub runtime that
+fails loudly if executed and asserts `launched: false` with the stub never run.
 
 Layout note: `oas-package/` is the exact distributed payload. Everything else in
 this repository — `schemas/`, `scripts/`, `test/`, CI, and the owner soul under

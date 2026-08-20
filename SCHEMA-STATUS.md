@@ -58,6 +58,16 @@ The consumer probe asserts what install actually guarantees (locks the
 capability, activates nothing, names the trust gate) and records this
 divergence as evidence rather than asserting documented-but-absent behavior.
 
+## Spawn resolves the runtime before `--no-launch`
+
+Not a defect, but a contract worth recording because it decides how any probe
+must be built: `oas spawn` constructs the launch command — and resolves the
+runtime binary with `command -v` — well above the `if (launch)` branch, so
+`--no-launch` still fails with `pi binary not found on PATH` when no runtime is
+installed. Scaffold-only spawning is therefore not host-independent. The
+consumer probe controls this explicitly in both directions rather than
+inheriting whatever the machine has.
+
 ## Version and compatibility
 
 `oas.linear` is at **2.0.0** with `compatibility.oas: ">=0.20.0"`. Raising the

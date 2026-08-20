@@ -30,7 +30,7 @@
  *   OAS_PROBE_KEEP=1 node scripts/…                 # keep the sandbox
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { createHash } from "node:crypto";
@@ -73,22 +73,78 @@ process.on("exit", () => {
   else rmSync(sandbox, { recursive: true, force: true });
 });
 
-/** The child environment: host PATH, sandbox HOME, and NOTHING of this
- *  process's OAS/pi instance context. LINEAR_API_KEY is deliberately absent —
- *  the probe asserts the unauthenticated failure path and never needs a key. */
-const probeEnv = () => {
-  const env = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (/^(OAS_|PI_)/.test(key)) continue;
-    if (key === "LINEAR_API_KEY" || key === "HOME") continue;
-    env[key] = value;
-  }
-  return { ...env, HOME: home };
+/**
+ * HOST EXECUTABLE ISOLATION.
+ *
+ * The probe must not pass or fail because of what happens to be installed on
+ * the developer's machine. Two things make that easy to get wrong:
+ *
+ *  - `oas spawn` resolves the RUNTIME binary before it honors `--no-launch`
+ *    (`lib/core.mjs`: `const bin = which(runtime === "claude" ? claudeBin :
+ *    "pi")` throws "pi binary not found on PATH" well above the `if (launch)`
+ *    branch). A scaffold-only spawn therefore still needs `pi` on PATH, so a
+ *    probe that inherits the host PATH silently depends on the developer
+ *    having pi installed — and fails in CI, which does not.
+ *  - host-requirement warnings are `command -v` lookups, so an ambient tool
+ *    changes what the kernel reports.
+ *
+ * So PATH is built, never inherited: an explicit allowlist of tools the probe
+ * genuinely needs, symlinked into a sandbox bin, plus STUBS we control. The
+ * stubs are executable and fail loudly, so "resolved on PATH" and "actually
+ * executed" stay distinguishable — nothing here should ever run one.
+ */
+const sandboxBin = join(sandbox, "bin");
+const stubMarker = join(sandbox, "stub-was-executed");
+mkdirSync(sandboxBin, { recursive: true });
+
+/** Real tools the probe itself needs. Resolved once, explicitly. */
+const HOST_TOOLS = ["node", "npm", "git", "sh", "env", "uname", "dirname", "basename", "cat"];
+const missingTools = [];
+for (const tool of HOST_TOOLS) {
+  const found = spawnSync("sh", ["-c", `command -v ${tool}`], { encoding: "utf8" });
+  const path = (found.stdout || "").trim();
+  if (path) symlinkSync(path, join(sandboxBin, tool));
+  else missingTools.push(tool);
+}
+
+/** A stub that is resolvable but must never actually run. */
+const writeStub = (name) => {
+  const path = join(sandboxBin, name);
+  writeFileSync(path, `#!/bin/sh
+echo "STUB ${name} WAS EXECUTED: $*" >> ${JSON.stringify(stubMarker)}
+echo "probe stub ${name} must never be executed" >&2
+exit 97
+`);
+  chmodSync(path, 0o755);
+  return path;
 };
+const removeStub = (name) => rmSync(join(sandboxBin, name), { force: true });
+
+/**
+ * @param {object} options
+ *   path  override PATH entirely (used for the runtime-absent direction)
+ */
+const probeEnv = (options = {}) => ({
+  // Allowlist, not a filtered copy of process.env: nothing of this agent
+  // instance's OAS/pi context, and no ambient tool, can reach the child.
+  PATH: options.path === undefined ? sandboxBin : options.path,
+  HOME: home,
+  TMPDIR: join(sandbox, "tmp"),
+  // Keep npm's network/store behavior inside the sandbox and reproducible.
+  npm_config_cache: join(sandbox, "npm-cache"),
+  npm_config_update_notifier: "false",
+  npm_config_fund: "false",
+  npm_config_audit: "false",
+  // Explicit, minimal passthrough so a proxied/CI network still works.
+  ...Object.fromEntries(["HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy",
+    "NPM_CONFIG_REGISTRY", "SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS", "LANG", "LC_ALL"]
+    .filter((k) => process.env[k] !== undefined).map((k) => [k, process.env[k]])),
+});
+mkdirSync(join(sandbox, "tmp"), { recursive: true });
 
 const run = (bin, args, options = {}) => spawnSync(bin, args, {
   cwd: options.cwd || scope,
-  env: probeEnv(),
+  env: probeEnv(options),
   encoding: "utf8",
 });
 
@@ -113,6 +169,8 @@ if (cli) {
   process.stdout.write(`  installed ${cli}\n`);
 }
 const oas = (...args) => run(cli, args);
+/** Same, with env/PATH control for the isolation checks. */
+const oasWith = (options, ...args) => run(cli, args, options);
 const oasJson = (...args) => {
   const result = oas(...args);
   const line = (result.stdout || "").trim().split("\n").filter((l) => l.startsWith("{")).pop();
@@ -389,7 +447,7 @@ const declaredCommands = Object.keys(
   JSON.parse(readFileSync(join(payloadRoot, "capabilities", "oas-linear", "oas.json"), "utf8")).commands,
 );
 
-check("the linear namespace dispatches every declared command", () => {
+check("bare-namespace usage lists every declared command", () => {
   const usage = oas("linear");
   equal(usage.status, 0, "bare namespace exit code");
   const output = usage.stderr + usage.stdout;
@@ -426,7 +484,7 @@ check("EVERY declared command fails cleanly and actionably without LINEAR_API_KE
     assert(payload.details, `\`oas linear ${command}\` must carry actionable details`);
     assert(!/lin_api_/.test(result.stdout + result.stderr), "no key material may appear in output");
   }
-  return `${declaredCommands.length} commands: JSON error naming LINEAR_API_KEY, exit 1, no login attempt`;
+  return `${declaredCommands.length} commands: JSON error naming LINEAR_API_KEY, exit 1`;
 });
 
 check("a command missing a required flag reports the FLAG, not the missing key", () => {
@@ -455,11 +513,40 @@ check("doctor resolves the tasks layer to oas.linear", () => {
   return "tasks → oas.linear, adopted base reported";
 });
 
-check("spawn runs the advisory hook and composes the Linear briefing", () => {
+check("the probe's execution environment is synthetic, not the developer's", () => {
+  assert(!missingTools.length, `probe could not resolve required host tools: ${missingTools.join(", ")}`);
+  // PATH is exactly the sandbox bin — no ambient tool can change a result.
+  const seen = oas("version");
+  equal(seen.status, 0, "kernel runs under the synthetic PATH");
+  const entries = readdirSync(sandboxBin).sort();
+  assert(!entries.includes("tmux"), "tmux must NOT be on the probe PATH — --no-launch must never need it");
+  assert(!entries.includes("pi") && !entries.includes("claude"), "no runtime should be present before the runtime checks");
+  assert(!existsSync(stubMarker), "no stub may have been executed yet");
+  return `PATH = ${entries.length} controlled entries (${entries.join(", ")})`;
+});
+
+check("scaffold-only spawn REFUSES when the runtime is absent from PATH", () => {
   git("add", "-A");
   git("commit", "-qm", "probe scope");
   const create = oas("create", "probe-agent", "--description", "consumer probe agent");
   assert(create.status === 0, `create failed: ${create.stderr}`);
+  // Released 0.20 resolves the runtime binary ABOVE the `--no-launch` branch,
+  // so a scaffold-only spawn still requires it. Proving the absent direction
+  // here is what keeps the present direction below from being an accident of
+  // the developer's machine.
+  const absent = oasJson("spawn", "probe-agent", "--task", "runtime-absent probe", "--no-launch", "--json");
+  equal(absent.ok, false, "spawn must fail with no runtime on PATH");
+  assert(/binary not found on PATH/.test(absent.error?.message || ""),
+    `expected a runtime-resolution failure, got ${JSON.stringify(absent.error)}`);
+  assert(!existsSync(stubMarker), "nothing should have been executed");
+  return absent.error.message;
+});
+
+check("spawn runs the advisory hook and composes the Linear briefing", () => {
+  // Present direction: a runtime the PROBE controls. The stub is resolvable but
+  // fails loudly if executed, so `--no-launch` genuinely not running it is
+  // observable rather than assumed.
+  writeStub("pi");
   const spawn = oasJson("spawn", "probe-agent", "--task", "consumer probe", "--no-launch", "--json");
   assert(spawn.ok, `spawn failed: ${JSON.stringify(spawn.error || spawn)}`);
   const warnings = (spawn.result.warnings || []).join(" ");
@@ -470,7 +557,11 @@ check("spawn runs the advisory hook and composes the Linear briefing", () => {
   const instanceHome = spawn.result.home;
   const task = readFileSync(join(instanceHome, "TASK.md"), "utf8");
   assert(/Tasks: Linear —/.test(task), "TASK.md must carry the hook's briefing");
-  assert(/label "agent-probe-agent-1"/.test(task), "TASK.md must carry the agent label identity");
+  // Derive the expected identity from the spawn result: the refused
+  // runtime-absent attempt above already consumed an instance ordinal, so a
+  // hardcoded name would be wrong (and would silently drift anyway).
+  assert(task.includes(`label "agent-${spawn.result.instance}"`),
+    `TASK.md must carry the agent label identity agent-${spawn.result.instance}`);
   assert(/capabilities\.layers\.tasks\.settings\.team/.test(task),
     "the briefing must name the CURRENT config path for an unset team");
 
@@ -490,7 +581,25 @@ check("spawn runs the advisory hook and composes the Linear briefing", () => {
   assert(entry.hooks.includes("spawn"), "instance capability hooks");
   assert(entry.skills.length && entry.skills.every(insideArtifact),
     `skills must resolve inside the materialized artifact, got ${entry.skills.join(", ")}`);
-  return `${spawn.result.instance}: briefing, injection, skills, trust`;
+
+  // --no-launch must SCAFFOLD ONLY: nothing started, and the controlled runtime
+  // stub never actually ran.
+  equal(spawn.result.launched, false, "--no-launch must not launch");
+  assert(!existsSync(stubMarker),
+    `--no-launch executed the runtime stub: ${existsSync(stubMarker) ? readFileSync(stubMarker, "utf8").trim() : ""}`);
+  return `${spawn.result.instance}: launched:false, stub unexecuted, briefing, injection, skills, trust`;
+});
+
+check("the stub would actually report an execution if one happened", () => {
+  // Non-vacuity guard for the two assertions above: run the stub deliberately
+  // and prove the marker mechanism fires, then clear it.
+  const stub = join(sandboxBin, "pi");
+  const forced = spawnSync(stub, ["--probe-self-test"], { env: probeEnv(), encoding: "utf8" });
+  equal(forced.status, 97, "stub must fail loudly when executed");
+  assert(existsSync(stubMarker), "stub execution must leave a marker");
+  rmSync(stubMarker, { force: true });
+  removeStub("pi");
+  return "stub fails with exit 97 and records execution";
 });
 
 // ── Report ──────────────────────────────────────────────────────────────────

@@ -45,14 +45,51 @@ export const uncommented = (text) => text.split("\n").map((line) => line.replace
 
 const unquote = (value) => value.replace(/^(['"])(.*)\1$/, "$2").trim();
 
-/** Scalar values of uncommented settings: `key: value` and `- value` list items. */
+/**
+ * Key/value split mirroring the SUPPORTED YAML subset of released OAS 0.20
+ * (`parseYamlNested` in lib/core.mjs), which accepts a quoted OR unquoted key:
+ *
+ *   /^(\s*)((?:["'][^"']+["'])|(?:[^:#][^:]*?)):\s*(.*?)\s*$/
+ *
+ * Matching a narrower shape than the kernel honors is how a leak slips
+ * through: `"account": acme-inc` is a live setting to the kernel, so it must be
+ * a live setting to this scanner too.
+ */
+const KEY_VALUE = /^\s*((?:["'][^"']+["'])|(?:[^:#][^:]*?)):\s*(.*?)\s*$/;
+
+/** Inner `key: value` pairs of a flow mapping — `{ a: 1, b: /x }`. The kernel
+ *  keeps a flow map as an opaque scalar rather than a nested map, but the bytes
+ *  are still copied into the adopter's repository, so a machine path or an
+ *  account inside one is still a leak. */
+function flowPairs(value) {
+  const pairs = [];
+  const body = value.match(/^\{(.*)\}$/s);
+  if (!body) return pairs;
+  for (const part of body[1].split(",")) {
+    const m = part.match(KEY_VALUE);
+    if (m) pairs.push({ key: unquote(m[1]), value: unquote(m[2]) });
+  }
+  return pairs;
+}
+
+/** Every scalar-ish token in a value, so an absolute path embedded anywhere —
+ *  a flow map, a list, an argument string — is still seen. */
+const tokens = (value) => value.split(/[\s,{}[\]]+/).map(unquote).filter(Boolean);
+
+/** Scalar values of uncommented settings: `key: value` pairs (quoted keys
+ *  included), `- value` list items, and the innards of flow mappings. */
 function scalarValues(text) {
   const found = [];
+  const push = (key, value) => {
+    found.push({ key, value });
+    for (const inner of flowPairs(value)) found.push(inner);
+  };
   for (const line of uncommented(text).split("\n")) {
-    const pair = line.match(/^\s*([A-Za-z0-9_.\-]+)\s*:\s*(\S.*?)\s*$/);
-    if (pair) { found.push({ key: pair[1], value: unquote(pair[2]) }); continue; }
+    if (!line.trim()) continue;
+    const pair = line.match(KEY_VALUE);
+    if (pair) { push(unquote(pair[1]), unquote(pair[2])); continue; }
     const item = line.match(/^\s*-\s+(\S.*?)\s*$/);
-    if (item) found.push({ key: undefined, value: unquote(item[1]) });
+    if (item) push(undefined, unquote(item[1]));
   }
   return found;
 }
@@ -67,8 +104,11 @@ export function portabilityLeaks(text) {
     if (pattern.test(text)) leaks.push(`contains ${what}`);
   }
   for (const { key, value } of scalarValues(text)) {
-    if (key && LOCAL_KEYS.test(key)) leaks.push(`sets the deployment-local key \`${key}:\``);
-    else if (isAbsolutePathValue(value)) leaks.push(`sets an absolute path (${key ? `${key}: ` : ""}${value})`);
+    if (key && LOCAL_KEYS.test(key)) { leaks.push(`sets the deployment-local key \`${key}:\``); continue; }
+    // Any token, not just a value that STARTS with a path: a flow mapping or an
+    // argument string embeds the path mid-value.
+    const path = tokens(value).find(isAbsolutePathValue);
+    if (path) leaks.push(`sets an absolute path (${key ? `${key}: ` : ""}${path})`);
   }
   return [...new Set(leaks)];
 }
