@@ -289,7 +289,15 @@ npm test     # manifest validation + unit tests
 npm run probe  # isolated consumer probe against a released kernel
 ```
 
-`npm test` validates both manifests against the vendored 0.20 schemas, enforces
+`npm test` names its suites explicitly rather than using `node --test`'s bare
+discovery: this repository contains nested agent worktrees under
+`agents/<soul>/instances/<id>/work/`, and bare discovery would recursively
+execute those instances' stale suites, making a green run depend on which agent
+worktrees happen to exist on the machine. `test/npm-scripts.test.mjs` keeps that
+fixed in both directions — no script may reintroduce bare discovery, and no
+suite may be dropped from the list and silently stop running.
+
+It validates both manifests against the vendored 0.20 schemas, enforces
 the dedicated-capability-root and config-template contracts, and exercises the
 GraphQL wrapper and advisory hook against local mock servers. Manifest
 validation deliberately mirrors released-0.20 self-containment exactly,
