@@ -1,0 +1,56 @@
+# oas.linear — "default" config template.
+#
+# A recommended STARTING POINT, not installed policy. `oas install` never
+# applies it; you adopt it explicitly with `oas init --package oas.linear`
+# (or `oas config adopt oas.linear --config default`). Once adopted this is an
+# ordinary, fully editable `oas-config.yaml` at your scope — package updates
+# never rewrite it, and `oas config diff` / `oas config sync` compare it against
+# the recorded adopted base.
+#
+# PORTABILITY: this file carries no Linear API key, workspace, account, team
+# key, project, or machine path. Everything deployment-local is left for you to
+# fill in below. Never commit a Linear API key to any config — the capability
+# reads it from `LINEAR_API_KEY` in the environment only.
+#
+# SCOPE: this template configures the TASKS layer and nothing else. It does not
+# choose your knowledge or messaging providers, and it does not declare a team
+# boundary — Linear is an adopter's deliberate choice, never an implicit
+# dependency of another package. Add those to your own config as you need them.
+
+# Rename this to your deployment.
+name: linear-tasks-deployment
+
+capabilities:
+  layers:
+    # The tasks layer is an exclusive slot: one provider, or an explicit `none`.
+    tasks:
+      capability: oas.linear
+      # `installed` = the materialized artifact under
+      # .agents/capabilities/installed/oas.linear/ that `oas install` writes.
+      from: installed
+
+      # ── Deployment-local settings (FILL THESE IN; intentionally unset here).
+      #
+      # The spawn hook reads these and briefs every instance with them. With no
+      # `team` it still spawns, and warns that the target is unset.
+      #
+      #   team    — REQUIRED to actually use Linear. Your team's issue-prefix
+      #             key, e.g. "ENG" for issues numbered ENG-123.
+      #   project — OPTIONAL default project name for new issues. Leave it out
+      #             rather than inventing one.
+      #
+      # settings:
+      #   team: ENG
+      #   project: Agent Platform
+
+      # Per-family targeting is yours too — retarget, disable, or re-set
+      # settings for one agent type or soul, e.g.:
+      #
+      # agent-types:
+      #   developers: true
+      # souls:
+      #   researcher:
+      #     enabled: false
+
+      # Replace the packaged `Tasks: Linear` instruction block with your own:
+      # injection-override: .agents/injections/oas-linear/linear.md

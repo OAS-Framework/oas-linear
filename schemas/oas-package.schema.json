@@ -2,13 +2,14 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://oas.dev/schemas/oas-package.schema.json",
   "title": "OAS distribution package manifest (oas-package.json)",
-  "description": "Manifest at a distribution-package root. A package is the source, acquisition, dependency, update, integrity, and review unit; it explicitly enumerates the capabilities and config profiles it ships. Install never ambiently loads undeclared files. Every declared path is package-relative and must remain inside the locked package after symlink resolution.",
+  "description": "Manifest at a distribution-package root. A package is the source, dependency, integrity, review and atomic-update unit — it is TRANSPORT, not the installed entity. Acquisition stages the package in a temporary transaction directory, validates the whole selected payload, MATERIALIZES each declared capability into .agents/capabilities/installed/<id>/, writes the exact lock, and discards staging; there is no persistent package store. Every package must therefore export at least one capability, and each capability entry must name a DEDICATED capability root whose declared paths and symlinks all resolve inside it, so the materialized artifact is self-contained, independently hashable and independently trustable. Config templates are optional package SOURCE MATERIAL, never installed behavior: `oas install` applies none of them. Install never ambiently loads undeclared files.",
   "type": "object",
   "required": [
     "package",
     "version",
     "description",
-    "compatibility"
+    "compatibility",
+    "capabilities"
   ],
   "properties": {
     "package": {
@@ -39,8 +40,9 @@
       "additionalProperties": false
     },
     "capabilities": {
-      "description": "Package-relative directories each containing one capability oas.json. Paths must not escape the package root after symlink resolution.",
+      "description": "Package-relative DEDICATED capability roots, each containing one capability oas.json. At least one is required — config-only and empty packages are rejected. A root of \".\" (the package root itself) is READ COMPATIBILITY for already-published packages only (e.g. oas.authoring@1.0.0, which is capabilities:[\".\"] and ships no templates at all): the compatibility reader accepts it whenever the manifest does not carry `configTemplates`, and rejects it as soon as it does, because a `configTemplates` manifest is unambiguously new. Authoring must never emit \".\"; newly authored packages use conventional roots such as \"capabilities/<slug>\". Paths must not escape the package root after symlink resolution, and everything the capability declares must resolve inside its OWN root — a capability that reaches package-only paths cannot be materialized and is rejected.",
       "type": "array",
+      "minItems": 1,
       "items": {
         "type": "string",
         "minLength": 1,
@@ -51,8 +53,8 @@
       },
       "uniqueItems": true
     },
-    "configs": {
-      "description": "Named config profiles: complete reference oas-config.yaml files that an adopter may snapshot with `oas init --package`. Profiles are config source material, never live policy.",
+    "configTemplates": {
+      "description": "Named config TEMPLATES: complete reference oas-config.yaml files an adopter may explicitly adopt with `oas init --package`. A template is a recommended starting point that becomes ordinary local policy on adoption — adopters may change every copied setting, and package updates never rewrite an adopted config. Templates must stay portable: no secret, credential, account, machine path or provider-local ID. Installation applies none of them. This is the canonical spelling; a manifest may not carry both this and the legacy `configs`.",
       "type": "object",
       "propertyNames": {
         "pattern": "^[a-z0-9][a-z0-9._-]*$"
@@ -64,7 +66,38 @@
         ],
         "properties": {
           "path": {
-            "description": "Package-relative path to the profile's oas-config.yaml.",
+            "description": "Package-relative path to the template's oas-config.yaml. CANONICAL LOCATION: it must live under config-templates/ with a nonempty contained file path (e.g. config-templates/default/oas-config.yaml). The deprecated `configs` spelling is exempt so already-published 0.19 tags stay readable. Runtime validation enforces the same rule — see isCanonicalTemplatePath in lib/core.mjs.",
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^config-templates/(?!\\.\\.?(/|$))[^/\\\\][^\\\\]*$",
+            "not": {
+              "pattern": "(^|/)\\.\\.(/|$)"
+            }
+          },
+          "description": {
+            "type": "string"
+          },
+          "default": {
+            "description": "At most one template may be marked default; it removes the need for --config at adoption.",
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "configs": {
+      "description": "DEPRECATED 0.19 spelling of `configTemplates`, readable only so immutable published 0.19 package tags stay consumable. Both spellings normalize to one descriptor shape; the diagnostic `legacySpelling` flag records which was used. It is NOT the discriminator for a \".\" capability root — published legacy packages exist with neither spelling. New authoring must emit `configTemplates`; carrying both spellings is an invalid manifest.",
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z0-9][a-z0-9._-]*$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "path"
+        ],
+        "properties": {
+          "path": {
             "type": "string",
             "minLength": 1,
             "pattern": "^[^/].*$",
@@ -76,7 +109,6 @@
             "type": "string"
           },
           "default": {
-            "description": "At most one profile may be marked default; it removes the need for --config at adoption.",
             "type": "boolean"
           }
         },
