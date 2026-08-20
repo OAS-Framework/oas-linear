@@ -285,7 +285,7 @@ document mutations agents may perform and which remain human-only.
 ## Development
 
 ```bash
-npm test     # manifest validation + unit tests
+npm test     # test-script gate + manifest validation + unit tests
 npm run probe  # isolated consumer probe against a released kernel
 ```
 
@@ -293,9 +293,14 @@ npm run probe  # isolated consumer probe against a released kernel
 discovery: this repository contains nested agent worktrees under
 `agents/<soul>/instances/<id>/work/`, and bare discovery would recursively
 execute those instances' stale suites, making a green run depend on which agent
-worktrees happen to exist on the machine. `test/npm-scripts.test.mjs` keeps that
-fixed in both directions — no script may reintroduce bare discovery, and no
-suite may be dropped from the list and silently stop running.
+worktrees happen to exist on the machine.
+[`scripts/check-test-scripts.mjs`](scripts/check-test-scripts.mjs) enforces that
+before the runner starts — no script may use bare discovery, `npm test` must
+name exactly the suites under `test/`, and it may not pass a test-filtering
+flag. The gate runs *outside* the test run on purpose: a filter such as
+`--test-name-pattern` can exclude the very assertion that would report it, so an
+in-suite check cannot catch its own filtering. `test/npm-scripts.test.mjs`
+unit-tests the same helpers.
 
 It validates both manifests against the vendored 0.20 schemas, enforces
 the dedicated-capability-root and config-template contracts, and exercises the
