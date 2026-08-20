@@ -60,6 +60,8 @@ const REJECTED_TEST_COMMANDS = [
   ["an extra bare invocation after a valid one", "node --test SUITES && node --test"],
   ["an extra bare invocation before a valid one", "node --test && node --test SUITES"],
   ["the gate invoked, then bare discovery anyway", "node scripts/check-test-scripts.mjs && node --test"],
+  ["validation named in the command instead of performed by the gate",
+   "npm run validate && node scripts/check-test-scripts.mjs"],
 ];
 
 /** Suite paths that must never be spliced into a command. */
@@ -222,6 +224,11 @@ function fixtureRepo(t) {
 
   mkdirSync(join(root, "scripts"), { recursive: true });
   cpSync(join(ROOT, "scripts", "check-test-scripts.mjs"), join(root, "scripts", "check-test-scripts.mjs"));
+  writeFileSync(join(root, "scripts", "validate-manifests.mjs"), [
+    'import { writeFileSync } from "node:fs";',
+    `writeFileSync(${JSON.stringify(join(markers, "validate"))}, "");`,
+    "",
+  ].join("\n"));
   suite("test/alpha.test.mjs", "alpha");
   suite("test/nested/beta.test.mjs", "beta");
   suite("agents/soul/instances/i1/work/test/stale.test.mjs", "decoy");
@@ -245,7 +252,8 @@ test("end-to-end: the gate runs exactly the inventoried suites", (t) => {
   const repo = fixtureRepo(t);
   const run = repo.runGate();
   assert.equal(run.status, 0, `${run.stdout}\n${run.stderr}`);
-  assert.deepEqual(repo.ran(), ["alpha", "beta"], "every suite under test/, and nothing else");
+  assert.deepEqual(repo.ran(), ["alpha", "beta", "validate"],
+    "validation, every suite under test/, and nothing else");
 });
 
 test("end-to-end: bare discovery WOULD have run the nested agent worktree", (t) => {
@@ -305,4 +313,50 @@ test("end-to-end: a nonzero suite exit becomes the gate's exit code", (t) => {
   ].join("\n"));
   const run = repo.runGate();
   assert.notEqual(run.status, 0, "a failing suite must fail the gate");
+});
+
+test("end-to-end: a failing validator stops the run before any suite", (t) => {
+  const repo = fixtureRepo(t);
+  writeFileSync(join(repo.root, "scripts", "validate-manifests.mjs"), 'process.exit(3);\n');
+  const run = repo.runGate();
+  assert.equal(run.status, 3, "the validator's exit status must propagate");
+  assert.deepEqual(repo.ran(), [], "no suite may run after validation fails");
+});
+
+test("end-to-end: a spoofed lifecycle variable cannot skip validation", (t) => {
+  // The reviewer-19d676d bypass, run through REAL npm. A noncanonical `test`
+  // rewrites package.json to canonical and invokes the gate with a forged
+  // npm_lifecycle_script, so both the file and the variable look canonical.
+  //
+  // That forgery still succeeds — the variable is a consistency check, not
+  // attestation, and the gate says so. What it can no longer buy is the prize:
+  // validation used to live in the command string as `npm run validate && …`,
+  // and re-spelling the command skipped it. The gate performs it now.
+  const repo = fixtureRepo(t);
+  const canonical = canonicalScripts(["test/alpha.test.mjs", "test/nested/beta.test.mjs"]);
+  writeFileSync(join(repo.root, "rewrite.mjs"), [
+    'import { readFileSync, writeFileSync } from "node:fs";',
+    'const p = new URL("./package.json", import.meta.url);',
+    'const pkg = JSON.parse(readFileSync(p, "utf8"));',
+    `pkg.scripts.test = ${JSON.stringify(canonical.test)};`,
+    "writeFileSync(p, JSON.stringify(pkg, null, 2));",
+    "",
+  ].join("\n"));
+  writeFileSync(join(repo.root, "package.json"), JSON.stringify({
+    name: "fixture", private: true, type: "module",
+    scripts: {
+      ...canonical,
+      test: `node rewrite.mjs && npm_lifecycle_script=${JSON.stringify(canonical.test)} `
+        + "node scripts/check-test-scripts.mjs",
+    },
+  }, null, 2));
+
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  const run = spawnSync("npm", ["test"], { cwd: repo.root, encoding: "utf8", env });
+
+  assert.equal(run.status, 0, `the forgery is expected to pass the gate: ${run.stdout}${run.stderr}`);
+  assert.ok(repo.ran().includes("validate"),
+    "validation must run even when the lifecycle variable is forged — it is performed, not named");
+  assert.ok(repo.ran().includes("alpha") && repo.ran().includes("beta"), "and the suites still run");
 });

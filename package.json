@@ -7,7 +7,7 @@
   "private": true,
   "scripts": {
     "validate": "node scripts/validate-manifests.mjs",
-    "test": "npm run validate \u0026\u0026 node scripts/check-test-scripts.mjs",
+    "test": "node scripts/check-test-scripts.mjs",
     "probe": "node scripts/consumer-probe.mjs"
   },
   "repository": {

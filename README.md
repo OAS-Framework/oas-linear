@@ -285,7 +285,7 @@ document mutations agents may perform and which remain human-only.
 ## Development
 
 ```bash
-npm test     # test-script gate + manifest validation + unit tests
+npm test       # test-script gate, which then runs manifest validation + unit tests
 npm run probe  # isolated consumer probe against a released kernel
 ```
 
@@ -297,9 +297,12 @@ worktrees happen to exist on the machine.
 [`scripts/check-test-scripts.mjs`](scripts/check-test-scripts.mjs) is both the
 gate and the runner. It parses nothing and detects nothing: it builds the
 `package.json` scripts block that this repository must have and compares it
-character for character, then spawns the suites itself with the inventory of
-`test/` passed as **argv** (`shell: false`), so no shell ever re-reads a suite
-path.
+character for character, then runs manifest validation and spawns the suites
+itself, with the inventory of `test/` passed as **argv** (`shell: false`), so no
+shell ever re-reads a suite path. `test` is therefore just
+`node scripts/check-test-scripts.mjs` — a step the gate *performs* cannot be
+skipped by re-spelling the command that invokes the gate, which a
+`npm run validate && …` chain could be.
 
 That bluntness is the result of four sharper designs failing, each to a spelling
 it did not model: a selection option whose *value* is a suite path
@@ -322,18 +325,29 @@ Three properties are not statements about the text and are enforced separately:
   `test/ ; true #.test.mjs` spliced into a shell command would drop its own
   suite and leave the run green; as argv it cannot, and the gate refuses the
   name outright rather than relying on that.
-- npm resolves a lifecycle command *before* running it, so a noncanonical
-  `test` could rewrite `package.json` to canonical and only then call the gate.
-  The gate compares `npm_lifecycle_script` — the bytes npm actually loaded,
-  which no later rewrite can change. It cannot defend against an edit to
-  itself or a `pretest` that removes itself; `pretest`/`posttest` in the tree
-  are rejected as unexpected scripts, and the rest is what review is for.
+- A noncanonical `test` can rewrite `package.json` to canonical before calling
+  the gate. The gate compares `npm_lifecycle_script`, which npm sets to the
+  command it loaded — but that is a **consistency check, not attestation**: the
+  loaded command controls the environment of everything it spawns, so it can
+  forge the variable too. The check reports divergence; it does not prove
+  provenance, and the code says so rather than implying otherwise.
+
+What the gate guarantees is correspondingly narrow, and stated plainly: **when
+it runs, manifest validation and exactly the inventoried suites run with it.**
+It is not a trust anchor against a hostile commit. A `pretest`, an edit to the
+gate itself, or a hostile `test` executes before or as the gate, and moving the
+check into another file in this repository would relocate that boundary without
+closing it. `pretest`/`posttest` are rejected as unexpected scripts; review,
+protected CI and branch policy are the controls beyond that point.
 
 [`test/npm-scripts.test.mjs`](test/npm-scripts.test.mjs) unit-tests the gate,
 keeps every historical bypass as a fixture, and runs the real script
 end-to-end in a throwaway repository containing a decoy suite in a nested agent
 worktree — asserting both that the decoy does not run and that bare discovery
-*would* have run it.
+*would* have run it. One end-to-end case drives **real npm** with a `test` that
+rewrites `package.json` and forges `npm_lifecycle_script`: it asserts the
+forgery still passes the gate, and that validation runs anyway. A limitation
+with a test on it cannot quietly be re-described as closed.
 
 It validates both manifests against the vendored 0.20 schemas, enforces
 the dedicated-capability-root and config-template contracts, and exercises the

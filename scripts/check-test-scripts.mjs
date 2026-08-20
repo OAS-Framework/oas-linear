@@ -52,15 +52,32 @@
  *    discovery, so a canonical-looking command built from an empty inventory
  *    would bless the exact defect this gate exists to prevent.
  *
- * WHAT THIS GATE CANNOT PROMISE. npm resolves a lifecycle command before the
- * command runs, so a noncanonical `test` could rewrite package.json to canonical
- * and only then invoke this file. `npm_lifecycle_script` defeats that specific
- * trick — it carries the bytes npm actually loaded, which a later rewrite cannot
- * change — and running the suites here means the verdict covers the run itself.
- * But a `pretest`, or any edit to THIS file, executes before or as the gate: no
- * in-repository check survives a committer who is willing to edit the checker.
- * The canonical-scripts comparison rejects `pretest`/`posttest` in the tree; the
- * defense against a hostile commit is review, not this script.
+ * The same reasoning governs VALIDATION. `npm run validate && node <this>` puts
+ * the validator in a command string, where whatever runs the string decides
+ * whether it happens; a `test` that rewrote package.json and called this file
+ * directly skipped validation entirely and still exited 0. So this file runs the
+ * validator too. A step this gate performs cannot be skipped by re-spelling the
+ * command that invokes the gate.
+ *
+ * WHAT THIS GATE DOES NOT PROMISE — stated precisely, because an overstated
+ * guarantee is worse than none.
+ *
+ * `npm_lifecycle_script` is a CONSISTENCY CHECK, not attestation. npm sets it to
+ * the command it loaded, so it catches an on-disk `test` that disagrees with the
+ * running one. It does NOT prove what npm loaded: the loaded command controls
+ * the environment of everything it spawns, so it can rewrite package.json AND
+ * export a canonical-looking value. That bypass is real and reproducible; it is
+ * checked here because divergence is worth reporting, not because it is
+ * unforgeable.
+ *
+ * More broadly: a `pretest`, an edit to THIS file, or a hostile `test` executes
+ * before or as the gate. No in-repository check survives a committer willing to
+ * edit the checker, and moving the check to another file in the same repository
+ * relocates that boundary without closing it. The canonical-scripts comparison
+ * rejects `pretest`/`posttest` in the tree; review, protected CI and branch
+ * policy are the controls beyond it. What this gate DOES guarantee is narrower
+ * and load-bearing: when it runs, validation and exactly the inventoried suites
+ * run with it.
  */
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
@@ -124,7 +141,9 @@ export function canonicalScripts(inventory) {
   if (problems.length) throw new Error(problems.join("\n"));
   return {
     validate: "node scripts/validate-manifests.mjs",
-    test: "npm run validate && node scripts/check-test-scripts.mjs",
+    // No `npm run validate &&` chain: the gate runs the validator itself, so no
+    // re-spelling of this command can skip it. See the header.
+    test: "node scripts/check-test-scripts.mjs",
     probe: "node scripts/consumer-probe.mjs",
   };
 }
@@ -154,15 +173,16 @@ export function checkScripts(pkg, inventory, env = {}) {
     }
   }
 
-  // The bytes npm actually loaded, which a package.json rewritten mid-run
-  // cannot retroactively change. Only meaningful when npm is running `test`.
+  // Consistency check, NOT attestation: the loaded command controls this
+  // variable in everything it spawns, so a hostile `test` can forge it. It is
+  // still worth reporting when the running command disagrees with the file.
   if (env.npm_lifecycle_event === "test" && typeof env.npm_lifecycle_script === "string") {
     if (env.npm_lifecycle_script !== expected.test) {
       problems.push(
         `npm is running a "test" command that is not the canonical one\n` +
           `    expected: ${expected.test}\n` +
           `    npm_lifecycle_script: ${env.npm_lifecycle_script}\n` +
-          "    package.json on disk may have been rewritten after npm loaded the command.",
+          "    package.json on disk disagrees with the command npm loaded.",
       );
     }
   }
@@ -179,7 +199,7 @@ if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import
     process.exit(1);
   }
   process.stdout.write(
-    `package.json scripts are canonical; running exactly the ${inventory.length} suite(s) under test/.\n`,
+    `package.json scripts are canonical; running validation and exactly the ${inventory.length} suite(s) under test/.\n`,
   );
   // argv, not shell text: the paths are handed to node as separate arguments.
   //
@@ -191,15 +211,17 @@ if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import
   // precise failure this file exists to prevent.
   const env = { ...process.env };
   delete env.NODE_TEST_CONTEXT;
-  const run = spawnSync(process.execPath, ["--test", ...inventory], {
-    cwd: ROOT,
-    stdio: "inherit",
-    shell: false,
-    env,
-  });
-  if (run.error) {
-    process.stderr.write(`Failed to run the suites: ${run.error.message}\n`);
-    process.exit(1);
-  }
-  process.exit(run.status === null ? 1 : run.status);
+
+  const spawn = (label, args) => {
+    const run = spawnSync(process.execPath, args, { cwd: ROOT, stdio: "inherit", shell: false, env });
+    if (run.error) {
+      process.stderr.write(`Failed to run ${label}: ${run.error.message}\n`);
+      process.exit(1);
+    }
+    if (run.status !== 0) process.exit(run.status === null ? 1 : run.status);
+  };
+
+  // Validation first, performed here rather than named in the `test` command.
+  spawn("manifest validation", ["scripts/validate-manifests.mjs"]);
+  spawn("the suites", ["--test", ...inventory]);
 }
