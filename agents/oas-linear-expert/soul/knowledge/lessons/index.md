@@ -1,0 +1,8 @@
+# Lessons
+
+* [Adversarial guards must prove their own negative direction](adversarial-guard-non-vacuity.md) - A guard that only ever runs in the passing direction can go inert, so fixtures must create the failure they claim would be caught and prove the detector notices it.
+* [Child-process guarantees require constructing the child environment](child-process-environment-boundaries.md) - A gate can perform the right child step and still be bypassed if caller-controlled environment variables decide what that child executes.
+* [Config portability scanners use the consumer parser as a floor, not as the whole policy](config-portability-scanner-parity.md) - A template scanner must catch every value the kernel parser would honor and separately label broader copied-byte policy rejections such as comments or block-sequence paths.
+* [OAS package self-containment is bounded by each materialized capability root](oas-package-materialization-boundaries.md) - A v2 install materializes one capability root at a time, so validators must check capability-declared resources against that root rather than the package payload root.
+* [Released-kernel probes must isolate OAS instance state and PATH-dependent runtime facts](oas-probe-isolation.md) - A consumer probe that inherits agent environment or host PATH can pass locally while exercising the host deployment or a local runtime binary instead of the sandbox.
+* [Test-script gates must narrow their claim to the boundary they control](test-script-gate-threat-model.md) - npm lifecycle metadata and package.json re-reads are consistency signals, not attestation, so the gate's real guarantee is the action it performs under its own untampered process.
