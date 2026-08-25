@@ -1,5 +1,9 @@
 # Knowledge Log
 
+## 2026-08-25
+* **Fix**: [Released OAS 0.20 package behavior facts](/references/oas-020-package-behavior.md) — corrected the config-template section, which wrongly claimed `oas doctor` reports available-but-unadopted templates; released doctor deliberately reports adopted template state only.
+* **Fix**: [The test-script gate runs the suites itself](/decisions/test-script-gate-runs-suites.md) — corrected the Decision section, which described the `test` script as chaining validation before the gate; the shipped `test` script is exactly the gate invocation and the gate runs the validator itself.
+
 ## 2026-08-20
 * **Harvest**: processed the frozen `oas-linear-expert-resume-v2` notes set (25 files) into consolidated oas-linear v2 knowledge; no notes were dropped.
 * **Creation**: [Adversarial guards must prove their own negative direction](/lessons/adversarial-guard-non-vacuity.md) — merged adversarial fixture, pinned-ref, sandboxed PATH, and probe non-vacuity lessons.

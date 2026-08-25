@@ -8,7 +8,7 @@ timestamp: 2026-08-20
 
 # Decision
 
-`oas-linear`'s `scripts/check-test-scripts.mjs` is both the test-script gate and the runner. The canonical `test` script runs validation and then `node scripts/check-test-scripts.mjs`; it does not name suite files in `package.json`. The gate inventories `test/` and spawns:
+`oas-linear`'s `scripts/check-test-scripts.mjs` is both the test-script gate and the runner. The canonical `test` script is exactly `node scripts/check-test-scripts.mjs`; it does not name suite files in `package.json`. The gate itself runs the validator first — there is no `npm run validate &&` chain, so re-spelling the `test` script cannot skip validation — then inventories `test/` and spawns:
 
 ```text
 node --test <suite paths...>

@@ -18,7 +18,7 @@ Maintainer ruling for the release wave: this is a kernel defect, not a package d
 
 ## `oas install` does not report available config templates
 
-Released docs say `oas install <package>` reports available templates as optional follow-ups. The install paths do not emit that notice. The config-template validation notice exists in the `oas init --package` adoption path, and `oas doctor` can report available-but-unadopted templates, but install output itself does not surface them.
+Released docs say `oas install <package>` reports available templates as optional follow-ups. The install paths do not emit that notice. The config-template validation notice exists only in the `oas init --package` adoption path; install output itself does not surface available templates. Released `oas doctor` deliberately does not enumerate unadopted templates either (a `bin/oas.mjs` design note records why: in the materialized model no package root exists on disk, and a diagnostic command must never fetch over the network to render a hint) — doctor reports adopted template state only.
 
 A package that ships a template should document adoption in its own README, and probes should assert released behavior rather than failing on the documented-but-unimplemented notice.
 
